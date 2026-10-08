@@ -1,0 +1,162 @@
+/* Line Synth design tokens — dark production-tool aesthetic.
+   Dense, near-black blue-gray, thin separators, bright accents reserved for
+   identity and focus. Monospace for numerics, system sans elsewhere. */
+
+@theme {
+	/* surfaces */
+	--color-bg-0: #0a0c10; /* app shell */
+	--color-bg-1: #10131a; /* panels / chrome */
+	--color-bg-2: #161a23; /* raised controls */
+	--color-bg-3: #1d222d; /* hover */
+	--color-bg-4: #262c39; /* active / pressed */
+
+	/* the editor keeps a wider contrast range than the chrome around it */
+	--color-ed-0: #05070b;
+	--color-ed-1: #0b0e14;
+	--color-ed-2: #131824;
+	--color-ed-3: #1b2230;
+
+	/* lines */
+	--color-line-0: #212734;
+	--color-line-1: #2c3444;
+	--color-line-2: #3b4658;
+
+	/* text */
+	--color-fg-0: #e9edf4;
+	--color-fg-1: #a4adbe;
+	--color-fg-2: #6d7688;
+	--color-fg-3: #4b5364;
+
+	/* semantics */
+	--color-accent: #4da3ff;
+	--color-accent-dim: #2a6ab0;
+	--color-warn: #e8a33d;
+	--color-danger: #f2564f;
+	--color-ok: #3ecf8e;
+	--color-ji: #c58bf5;
+
+	/* motion — custom curves, never the weak built-ins */
+	--ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+	--ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+	--ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+
+	--font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+	--font-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+}
+
+:root {
+	/* track identity accents — identity only, never magnitude */
+	--track-1: #4da3ff;
+	--track-2: #3ecf8e;
+	--track-3: #f2a33d;
+	--track-4: #f2564f;
+	--track-5: #c58bf5;
+	--track-6: #4fd6d6;
+	--track-7: #e26bc4;
+	--track-8: #a8b34a;
+
+	/* density scale — dashboard-dense, 4px base */
+	--sp-1: 4px;
+	--sp-2: 6px;
+	--sp-3: 8px;
+	--sp-4: 12px;
+	--sp-5: 16px;
+	--sp-6: 24px;
+
+	--r-1: 3px;
+	--r-2: 5px;
+	--r-3: 8px;
+
+	--h-row: 24px;
+	--h-control: 26px;
+	--h-topbar: 44px;
+	--h-tabs: 38px;
+
+	--z-menu: 60;
+	--z-modal: 80;
+
+	color-scheme: dark;
+}
+
+html,
+body {
+	height: 100%;
+	margin: 0;
+	background: var(--color-bg-0);
+	color: var(--color-fg-0);
+	font-family: var(--font-sans);
+	font-size: 13px;
+	line-height: 1.45;
+	-webkit-font-smoothing: antialiased;
+	overflow: hidden;
+}
+
+* {
+	box-sizing: border-box;
+}
+
+/* Numeric precision readouts */
+.num {
+	font-family: var(--font-mono);
+	font-variant-numeric: tabular-nums;
+	font-size: 11.5px;
+	letter-spacing: 0.01em;
+}
+
+/* Precision matters at small sizes: slight positive tracking, never negative */
+.label {
+	font-size: 10px;
+	font-weight: 600;
+	letter-spacing: 0.07em;
+	text-transform: uppercase;
+	color: var(--color-fg-2);
+}
+
+.hairline {
+	border-color: var(--color-line-0);
+}
+
+/* Focus is always visible and never removed */
+:focus-visible {
+	outline: 2px solid var(--color-accent);
+	outline-offset: 1px;
+	border-radius: var(--r-1);
+}
+
+::selection {
+	background: color-mix(in oklab, var(--color-accent) 35%, transparent);
+}
+
+/* Scrollbars sized for a dense tool surface */
+* {
+	scrollbar-width: thin;
+	scrollbar-color: var(--color-line-2) transparent;
+}
+*::-webkit-scrollbar {
+	width: 10px;
+	height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+	background: var(--color-line-2);
+	border: 3px solid transparent;
+	background-clip: content-box;
+	border-radius: 6px;
+}
+*::-webkit-scrollbar-thumb:hover {
+	background: var(--color-fg-3);
+	background-clip: content-box;
+}
+*::-webkit-scrollbar-track {
+	background: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+		scroll-behavior: auto !important;
+	}
+}
