@@ -16,9 +16,12 @@ import {
 	createDefaultProject,
 	createTrack,
 	growDurationForContent,
-	nextTrackColor
+	nextTrackColor,
+	reconcilePointLinks
 } from '#lib/model/project';
-import type { Curve, Project, Track } from '#lib/model/types';
+import type { Curve, CurvePoint, Project, Track } from '#lib/model/types';
+import { pointPixel } from '#lib/editor/hitTesting';
+import { createTransform } from '#lib/editor/transform';
 import { defaultViewport } from '#lib/editor/viewport';
 import type { ViewportState } from '#lib/editor/transform';
 import {
@@ -63,6 +66,10 @@ export interface Session {
 	initialized: boolean;
 	showInspector: boolean;
 	showOnboarding: boolean;
+	/** automation panel: track ids whose lanes are shown; empty follows the active tab */
+	automationTrackIds: string[];
+	/** drag-resizable height of the automation lane list, in px */
+	automationPanelHeight: number;
 	/** clipboard for curve/point copy-paste */
 	clipboard: { curves: Curve[]; atBeat: number } | null;
 }
@@ -87,6 +94,8 @@ export const session = $state<Session>({
 	initialized: false,
 	showInspector: true,
 	showOnboarding: false,
+	automationTrackIds: [],
+	automationPanelHeight: 200,
 	clipboard: null
 });
 
@@ -96,7 +105,9 @@ const storage = createProjectStorage();
 /* --------------------------------------------------------------- mutation */
 
 function applyProject(next: Project): void {
-	session.project = { ...next, updatedAt: Date.now() };
+	// single choke point: keep branch junctions glued to their source point
+	const reconciled = reconcilePointLinks(next);
+	session.project = { ...reconciled, updatedAt: Date.now() };
 	session.revision += 1;
 	// the audio engine schedules from the live snapshot on its next tick
 	engine.setProject(session.project);
@@ -468,6 +479,12 @@ export function createTrackAndSelect(name?: string): string {
  * Non-enumerable so it stays out of console dumps and app code.
  */
 Object.defineProperty(globalThis, '__linesynth', {
-	value: { engine, session },
+	value: {
+		engine,
+		session,
+		/** model point → canvas pixel, used by the verification harnesses */
+		toPixel: (point: { time: number; frequency: number }) =>
+			pointPixel(point as CurvePoint, createTransform(session.viewport))
+	},
 	configurable: true
 });

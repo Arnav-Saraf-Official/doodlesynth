@@ -372,7 +372,7 @@
 </script>
 
 <svelte:head>
-	<title>Wavetables — Line Synth</title>
+	<title>Wavetables — Doodlesynth</title>
 	<meta
 		name="description"
 		content="Author wavetables by drawing a waveform shape or by editing an additive harmonic spectrum."
@@ -381,7 +381,7 @@
 
 <div class="page">
 	<header class="page-header">
-		<a class="logo" href="/" aria-label="Back to the Line Synth editor">
+		<a class="logo" href="/" aria-label="Back to the Doodlesynth editor">
 			<svg viewBox="0 0 18 18" width="16" height="16" aria-hidden="true">
 				<path
 					d="M2 13c3 0 3-8 6-8s3 8 6 8"

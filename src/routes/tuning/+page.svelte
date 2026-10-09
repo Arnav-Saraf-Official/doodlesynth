@@ -177,11 +177,11 @@
 	}
 </script>
 
-<svelte:head><title>Tuning — Line Synth</title></svelte:head>
+<svelte:head><title>Tuning — Doodlesynth</title></svelte:head>
 
 <div class="page">
 	<header class="topbar">
-		<a class="brand" href="/">Line Synth</a>
+		<a class="brand" href="/">Doodlesynth</a>
 		<nav>
 			<a href="/">Editor</a>
 			<a href="/wavetables">Wavetables</a>

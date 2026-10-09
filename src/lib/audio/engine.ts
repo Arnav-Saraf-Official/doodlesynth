@@ -95,6 +95,65 @@ function pulseWave(ctx: BaseAudioContext): PeriodicWave {
 	return ctx.createPeriodicWave(real, imag, { disableNormalization: false });
 }
 
+/** Base Fourier coefficients (sine series) for a built-in wave shape. */
+function waveCoefficients(wave: SynthSettings['wave'], harmonics = 64) {
+	const real = new Float32Array(harmonics + 1);
+	const imag = new Float32Array(harmonics + 1);
+	const duty = 0.25;
+	for (let n = 1; n <= harmonics; n++) {
+		if (wave === 'sine') {
+			imag[n] = n === 1 ? 1 : 0;
+		} else if (wave === 'saw') {
+			imag[n] = (2 / (n * Math.PI)) * (n % 2 === 1 ? 1 : -1);
+		} else if (wave === 'square') {
+			imag[n] = n % 2 === 1 ? 4 / (n * Math.PI) : 0;
+		} else if (wave === 'triangle') {
+			if (n % 2 === 1) {
+				const sign = ((n - 1) / 2) % 2 === 0 ? 1 : -1;
+				imag[n] = (8 / (Math.PI * Math.PI)) * (sign / (n * n));
+			}
+		} else if (wave === 'pulse') {
+			imag[n] = (2 / (n * Math.PI)) * Math.sin(Math.PI * n * duty);
+		}
+	}
+	return { real, imag };
+}
+
+/** A built-in wave rotated by `phase` (0..1 of a cycle), preserving its shape. */
+function phaseShiftedWave(
+	ctx: BaseAudioContext,
+	wave: SynthSettings['wave'],
+	phase: number
+): PeriodicWave {
+	const { real, imag } = waveCoefficients(wave);
+	const shiftedReal = new Float32Array(real.length);
+	const shiftedImag = new Float32Array(imag.length);
+	for (let n = 1; n < imag.length; n++) {
+		const delta = 2 * Math.PI * n * phase;
+		shiftedReal[n] = imag[n] * Math.sin(delta);
+		shiftedImag[n] = imag[n] * Math.cos(delta);
+	}
+	return ctx.createPeriodicWave(shiftedReal, shiftedImag, { disableNormalization: false });
+}
+
+/**
+ * Deterministic initial phase fraction for a voice. Zero randomization (the
+ * default) returns 0, so every voice starts at phase 0 and voices that begin
+ * together — a branched line especially — reinforce rather than cancel.
+ */
+function phaseFraction(curve: Curve): number {
+	const amount = clamp(curve.phaseRandomization ?? 0, 0, 1);
+	if (amount <= 0) return 0;
+	// FNV-1a over the curve id: stable across rebuilds so the phase never jitters
+	let hash = 2166136261;
+	for (let i = 0; i < curve.id.length; i++) {
+		hash ^= curve.id.charCodeAt(i);
+		hash = Math.imul(hash, 16777619);
+	}
+	const random = ((hash >>> 0) % 100000) / 100000;
+	return random * amount;
+}
+
 function whiteNoiseBuffer(ctx: BaseAudioContext): AudioBuffer {
 	const length = Math.floor(ctx.sampleRate * 2);
 	const buffer = ctx.createBuffer(1, length, ctx.sampleRate);
@@ -271,7 +330,7 @@ class PlaybackGraph {
 			if (!this.audible(track)) continue;
 			const curves = track.curves
 				.filter((curve) => curve.points.length > 0 && !curve.muted)
-				.map((curve) => curve.id);
+				.map((curve) => `${curve.id}:${Number((curve.phaseRandomization ?? 0).toFixed(3))}`);
 			if (curves.length === 0) continue;
 			parts.push(
 				`${track.id}:${track.synth.wave}:${track.synth.wavetableId ?? ''}:${Number(
@@ -303,6 +362,8 @@ class PlaybackGraph {
 
 		let source: AudioScheduledSourceNode;
 		let pitch: AudioParam | null = null;
+		const phase = phaseFraction(curve);
+		let startOffset = 0;
 
 		if (synth.wave === 'white-noise') {
 			if (!this.noiseBuffer) return null;
@@ -317,10 +378,13 @@ class PlaybackGraph {
 			cycle.buffer = tableCycle(ctx, table, synth.wavetablePosition);
 			cycle.loop = true;
 			pitch = cycle.playbackRate;
+			// offset into the looping cycle is an exact phase shift
+			if (phase > 0) startOffset = phase * cycle.buffer.duration;
 			source = cycle;
 		} else {
 			const oscillator = ctx.createOscillator();
-			if (synth.wave === 'pulse') oscillator.setPeriodicWave(this.pulse);
+			if (phase > 0) oscillator.setPeriodicWave(phaseShiftedWave(ctx, synth.wave, phase));
+			else if (synth.wave === 'pulse') oscillator.setPeriodicWave(this.pulse);
 			else if (synth.wave === 'saw') oscillator.type = 'sawtooth';
 			else oscillator.type = synth.wave;
 			pitch = oscillator.frequency;
@@ -329,7 +393,8 @@ class PlaybackGraph {
 
 		source.connect(gain);
 		try {
-			source.start(this.startTime);
+			if (startOffset > 0) (source as AudioBufferSourceNode).start(this.startTime, startOffset);
+			else source.start(this.startTime);
 		} catch {
 			return null;
 		}

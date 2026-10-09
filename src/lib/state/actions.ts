@@ -13,6 +13,7 @@ import {
 } from '#lib/model/automation';
 import {
 	copyPoint,
+	createPoint,
 	insertPointAt,
 	offsetPoints,
 	removePoint,
@@ -36,9 +37,11 @@ import {
 	duplicateCurve,
 	duplicateTrack,
 	findTrack,
-	growDurationForContent
+	growDurationForContent,
+	TRACK_COLORS
 } from '#lib/model/project';
 import { duplicateLanes } from '#lib/model/automation';
+import { uid } from '#lib/model/ids';
 import {
 	createHarmonicComponents,
 	createWavetable,
@@ -609,6 +612,89 @@ export function snapSelectionToNotes(): void {
 			? `Snapped ${snapped} ${snapped === 1 ? 'point' : 'points'} to note Hz`
 			: 'Selected points are already on note frequencies'
 	);
+}
+
+/**
+ * Branch a line at one of its control points: a new, independent voice is born
+ * at that exact point and follows the source's remaining shape, so the two
+ * lines share a start and can be edited apart. The branch copies the parent's
+ * phase setting, so with the default (no randomization) both voices begin in
+ * phase instead of cancelling each other.
+ */
+export function branchCurveAtPoint(trackId: Id, curveId: Id, pointId: Id): string | null {
+	let createdId: string | null = null;
+	mutate('Branch curve', (project) =>
+		mapTracks(project, trackId, (track) => {
+			const index = track.curves.findIndex((curve) => curve.id === curveId);
+			if (index < 0) return track;
+			const source = track.curves[index];
+			const pointIndex = source.points.findIndex((point) => point.id === pointId);
+			if (pointIndex < 0) return track;
+
+			const originPointId = source.points[pointIndex].id;
+			const tail = source.points
+				.slice(pointIndex)
+				.map((point) => ({ ...copyPoint(point), id: uid('pt') }));
+			if (tail.length < 2) {
+				const last = tail[0];
+				tail.push({ ...last, id: uid('pt'), time: last.time + 1 });
+			}
+			// the branch start stays glued to the fork point until it is deleted
+			tail[0] = { ...tail[0], link: { curveId: source.id, pointId: originPointId } };
+
+			const branchId = uid('curve');
+			const branch: Curve = {
+				...source,
+				id: branchId,
+				name: `${source.name} branch`,
+				color: unusedPaletteColor(track, source.color ?? track.color),
+				points: tail
+			};
+			const curves = [...track.curves];
+			curves.splice(index + 1, 0, branch);
+			createdId = branchId;
+			return { ...track, curves };
+		})
+	);
+	if (createdId) session.selectedCurveIds = [createdId];
+	return createdId;
+}
+
+/**
+ * Drag-a-point-onto-another-line: drop a new junction point on the target curve
+ * at the origin point's position and link it, so the two lines stay joined.
+ * Returns the new point id, or null when nothing was added.
+ */
+export function attachPointToCurve(
+	trackId: Id,
+	targetCurveId: Id,
+	origin: { curveId: Id; pointId: Id; time: number; frequency: number }
+): string | null {
+	let createdId: string | null = null;
+	mutate('Link to curve', (project) =>
+		mapCurves(project, trackId, (curve) => {
+			if (curve.id !== targetCurveId) return curve;
+			if (curve.points.some((point) => point.link?.pointId === origin.pointId)) return curve;
+			const point: CurvePoint = {
+				...createPoint(origin.time, origin.frequency, 'smooth'),
+				link: { curveId: origin.curveId, pointId: origin.pointId }
+			};
+			createdId = point.id;
+			const points = [...curve.points, point].sort((a, b) => a.time - b.time);
+			return { ...curve, points };
+		})
+	);
+	return createdId;
+}
+
+/** First palette entry no line in the track uses yet, else the next one over. */
+function unusedPaletteColor(track: Track, fallback: string): string {
+	const used = new Set<string>([track.color]);
+	for (const curve of track.curves) if (curve.color) used.add(curve.color);
+	const free = TRACK_COLORS.find((color) => !used.has(color));
+	if (free) return free;
+	const index = TRACK_COLORS.indexOf(fallback);
+	return TRACK_COLORS[(index + 1 + TRACK_COLORS.length) % TRACK_COLORS.length];
 }
 
 /** Split a curve into evenly spaced beats, used by the pen tool release. */

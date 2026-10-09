@@ -14,6 +14,7 @@ import { createBuiltInScales } from './scale';
 import { createBuiltInWavetables, refreshFrameSamples, DEFAULT_SAMPLE_LENGTH } from './wavetable';
 import type {
 	Curve,
+	CurvePoint,
 	EditorSettings,
 	Envelope,
 	Id,
@@ -39,6 +40,64 @@ export const TRACK_COLORS = [
 	'#e26bc4',
 	'#a8b34a'
 ];
+
+/**
+ * Resolve the colour a curve paints with. Curves default to the track accent,
+ * but once a track holds sibling voice paths each one claims its own palette
+ * entry so separate lines stay legible at a glance.
+ */
+export function curveColorFor(track: Track, curve: Curve): string {
+	if (curve.color) return curve.color;
+	if (track.curves.length <= 1) return track.color;
+	const index = track.curves.findIndex((entry) => entry.id === curve.id);
+	const base = TRACK_COLORS.indexOf(track.color);
+	const offset = (base < 0 ? 0 : base) + Math.max(index, 0);
+	return TRACK_COLORS[offset % TRACK_COLORS.length];
+}
+
+/**
+ * Keep branch junctions glued to the point they were linked to. A point stores
+ * `link`; on every project change the linked point's time/frequency is copied
+ * onto it, so moving the source point moves the junction while the rest of its
+ * curve stays put. Deleting the source point detaches it in place.
+ * Idempotent: returns the same project when nothing needs syncing.
+ */
+export function reconcilePointLinks(project: Project): Project {
+	let changed = false;
+	const tracks = project.tracks.map((track) => {
+		if (!track.curves.some((curve) => curve.points.some((point) => point.link))) return track;
+		// resolved points by id, updated in order so a link chain settles
+		const points = new Map<Id, CurvePoint>();
+		for (const curve of track.curves) {
+			for (const point of curve.points) points.set(point.id, point);
+		}
+		let trackChanged = false;
+		const curves = track.curves.map((curve) => {
+			let curveChanged = false;
+			const nextPoints = curve.points.map((point) => {
+				const link = point.link;
+				if (!link) return point;
+				const target = points.get(link.pointId);
+				if (!target) {
+					// the linked point is gone: keep the junction but stop tracking it
+					curveChanged = true;
+					return { ...point, link: undefined };
+				}
+				if (point.time === target.time && point.frequency === target.frequency) return point;
+				curveChanged = true;
+				return { ...point, time: target.time, frequency: target.frequency };
+			});
+			const updated = curveChanged ? { ...curve, points: nextPoints } : curve;
+			for (const point of updated.points) points.set(point.id, point);
+			if (curveChanged) trackChanged = true;
+			return updated;
+		});
+		if (!trackChanged) return track;
+		changed = true;
+		return { ...track, curves };
+	});
+	return changed ? { ...project, tracks } : project;
+}
 
 export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
 	pitchMap: 'piano',
@@ -88,7 +147,8 @@ export function createCurve(
 		envelope: createDefaultEnvelope(),
 		gainDb: 0,
 		pan: 0,
-		muted: false
+		muted: false,
+		phaseRandomization: 0
 	};
 }
 

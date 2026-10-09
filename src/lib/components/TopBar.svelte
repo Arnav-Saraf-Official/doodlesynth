@@ -42,7 +42,7 @@
 
 <header class="topbar">
 	<div class="identity">
-		<a class="logo" href="/" aria-label="Line Synth editor">
+		<a class="logo" href="/" aria-label="Doodlesynth editor">
 			<svg viewBox="0 0 18 18" width="18" height="18" aria-hidden="true">
 				<path
 					d="M2 13c3 0 3-8 6-8s3 8 6 8"
@@ -53,7 +53,7 @@
 				/>
 				<circle cx="8" cy="5" r="1.4" fill="currentColor" />
 			</svg>
-			<span>Line Synth</span>
+			<span>Doodlesynth</span>
 		</a>
 		<nav class="nav" aria-label="Sections">
 			<a href="/wavetables">Wavetables</a>

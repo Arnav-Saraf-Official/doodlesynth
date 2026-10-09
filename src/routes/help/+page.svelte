@@ -40,11 +40,11 @@
 	];
 </script>
 
-<svelte:head><title>Help — Line Synth</title></svelte:head>
+<svelte:head><title>Help — Doodlesynth</title></svelte:head>
 
 <div class="page">
 	<header class="topbar">
-		<a class="brand" href="/">Line Synth</a>
+		<a class="brand" href="/">Doodlesynth</a>
 		<nav>
 			<a href="/">Editor</a>
 			<a href="/wavetables">Wavetables</a>
@@ -125,6 +125,15 @@
 				</div>
 			</dl>
 		</Panel>
+
+		<footer class="credits">
+			<p>
+				Copyright 2026 Doodlesynth -
+				<a href="https://arnavsaraf.pages.dev" target="_blank" rel="noopener noreferrer"
+					>Arnav Saraf</a
+				>
+			</p>
+		</footer>
 	</main>
 </div>
 
@@ -273,5 +282,28 @@
 		line-height: 1.55;
 		color: var(--color-fg-2);
 		max-width: 82ch;
+	}
+
+	.credits {
+		margin-top: var(--sp-5);
+		padding-top: var(--sp-4);
+		border-top: 1px solid var(--color-line-0);
+	}
+
+	.credits p {
+		margin: 0;
+		font-size: 11px;
+		letter-spacing: 0.01em;
+		color: var(--color-fg-3);
+	}
+
+	.credits a {
+		color: var(--color-accent);
+		text-decoration: none;
+		border-bottom: 1px solid color-mix(in oklab, var(--color-accent) 45%, transparent);
+	}
+
+	.credits a:hover {
+		color: var(--color-fg-0);
 	}
 </style>

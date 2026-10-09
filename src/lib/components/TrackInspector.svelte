@@ -8,6 +8,7 @@
 	 */
 	import {
 		addLfo,
+		branchCurveAtPoint,
 		duplicateTrackById,
 		removeLfo,
 		removeTrack,
@@ -22,7 +23,13 @@
 		updateSynth,
 		updateTrackMixer
 	} from '#lib/state/actions';
-	import { activeTrack, isMasterSelected, mutate, session } from '#lib/state/session.svelte';
+	import {
+		activeTrack,
+		isMasterSelected,
+		mutate,
+		session,
+		setStatus
+	} from '#lib/state/session.svelte';
 	import { resolveMusicalState, resolveScale } from '#lib/model/musicalState';
 	import { JI_ANCHOR_LABELS, tuningLabel } from '#lib/model/tuning';
 	import { formatParameterValue, parametersForScope } from '#lib/model/parameters';
@@ -217,6 +224,41 @@
 						/>
 					</Field>
 
+					<div class="curve-color">
+						<button
+							type="button"
+							class="swatch"
+							style="background:{selectedCurve.color ?? track.color}"
+							aria-label="Curve colour, click to cycle"
+							title="Curve colour — click to cycle through the track palette"
+							onclick={() => {
+								const currentColor = selectedCurve.color ?? track.color;
+								const index = TRACK_COLORS.indexOf(currentColor);
+								updateCurve(
+									track.id,
+									selectedCurve.id,
+									{ color: TRACK_COLORS[(index + 1) % TRACK_COLORS.length] },
+									'Curve colour'
+								);
+							}}
+						></button>
+						<span class="curve-color-label"
+							>{selectedCurve.color ? 'Line colour · custom' : 'Line colour · follows track'}</span
+						>
+					</div>
+
+					<button
+						type="button"
+						class="branch-button"
+						title="Branch a new voice from this line's first point"
+						onclick={() => {
+							branchCurveAtPoint(track.id, selectedCurve.id, firstPoint.id);
+							setStatus('Branched a new voice from the first point — both start in phase');
+						}}
+					>
+						Branch new voice
+					</button>
+
 					<div class="grid-2">
 						<NumberField
 							label="Start beat"
@@ -333,6 +375,26 @@
 						/>
 						<span class="value num">{Math.round(selectedCurve.pan * 100)}%</span>
 					</Field>
+					<Field label="Phase randomization">
+						<Slider
+							value={selectedCurve.phaseRandomization ?? 0}
+							min={0}
+							max={1}
+							step={0.01}
+							ariaLabel="Voice phase randomization"
+							onchange={(value) =>
+								updateCurve(
+									track.id,
+									selectedCurve.id,
+									{ phaseRandomization: value },
+									'Phase randomization'
+								)}
+						/>
+						<span class="value num"
+							>{Math.round((selectedCurve.phaseRandomization ?? 0) * 100)}%</span
+						>
+					</Field>
+					<p class="note dim">0% keeps voices in phase; raise it to decorrelate stacked voices.</p>
 				</Panel>
 			{:else}
 				<div class="empty">
@@ -969,6 +1031,42 @@
 
 	.swatch:active {
 		transform: scale(0.94);
+	}
+
+	.curve-color {
+		display: flex;
+		align-items: center;
+		gap: var(--sp-2);
+		padding: 2px 0;
+	}
+
+	.curve-color-label {
+		font-size: 10px;
+		color: var(--color-fg-3);
+	}
+
+	.branch-button {
+		width: 100%;
+		height: var(--h-row);
+		border: 1px solid var(--color-line-1);
+		border-radius: var(--r-1);
+		background: var(--color-bg-3);
+		color: var(--color-fg-0);
+		font-size: 11px;
+		cursor: pointer;
+		transition:
+			background-color 120ms var(--ease-out),
+			border-color 120ms var(--ease-out),
+			transform 120ms var(--ease-out);
+	}
+
+	.branch-button:hover {
+		background: var(--color-bg-4);
+		border-color: var(--color-accent);
+	}
+
+	.branch-button:active {
+		transform: scale(0.98);
 	}
 
 	.swatch.is-master {

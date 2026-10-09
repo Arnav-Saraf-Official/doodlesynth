@@ -187,10 +187,10 @@
 </script>
 
 <svelte:head>
-	<title>{session.project.name} — Line Synth</title>
+	<title>{session.project.name} — Doodlesynth</title>
 	<meta
 		name="description"
-		content="Line Synth is a static, client-side instrument for drawing continuous pitch curves instead of entering MIDI notes."
+		content="Doodlesynth is a static, client-side instrument for drawing continuous pitch curves instead of entering MIDI notes."
 	/>
 </svelte:head>
 
@@ -241,7 +241,6 @@
 				<TrackOverview />
 				<AutomationPanel
 					trackId={MASTER_TRACK_ID}
-					accent={automationAccent}
 					width={session.viewport.width}
 					startBeat={session.viewport.startBeat}
 					pixelsPerBeat={session.viewport.pixelsPerBeat}
@@ -252,7 +251,6 @@
 				<CurveEditor />
 				<AutomationPanel
 					trackId={automationTrackId}
-					accent={automationAccent}
 					width={session.viewport.width}
 					startBeat={session.viewport.startBeat}
 					pixelsPerBeat={session.viewport.pixelsPerBeat}
@@ -271,7 +269,7 @@
 	{#if session.showOnboarding && session.project.tracks.length === 0}
 		<div class="onboarding" role="dialog" aria-label="Start creating">
 			<div class="onboarding-card">
-				<p class="label">Line Synth</p>
+				<p class="label">Doodlesynth</p>
 				<h1>Draw a curve to create a voice</h1>
 				<p class="blurb">
 					A voice is a curve through continuous frequency, not a row of MIDI notes. Create a track,

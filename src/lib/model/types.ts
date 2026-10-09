@@ -1,5 +1,5 @@
 /**
- * Line Synth project model.
+ * Doodlesynth project model.
  *
  * This module is deliberately free of Svelte and of the DOM. The audio engine,
  * the renderer, persistence and tests all consume these types, so nothing here
@@ -45,6 +45,11 @@ export interface CurvePoint {
 	inHandle?: Handle;
 	outHandle?: Handle;
 	scaleRef?: ScaleRef;
+	/**
+	 * When set, this point tracks a point on another curve (a branch junction):
+	 * moving the linked point moves this one. Cleared if that point is deleted.
+	 */
+	link?: { curveId: Id; pointId: Id };
 }
 
 /* --------------------------------------------------------------- envelope */
@@ -71,6 +76,12 @@ export interface Curve {
 	muted: boolean;
 	/** overrides the track accent when set */
 	color?: string;
+	/**
+	 * 0..1 initial-phase randomization for this voice. 0 (the default) starts
+	 * every voice at phase 0, so voices that begin together — including a
+	 * branched line — stay in phase instead of cancelling each other.
+	 */
+	phaseRandomization?: number;
 }
 
 /* ------------------------------------------------------------- automation */

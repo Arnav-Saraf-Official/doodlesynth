@@ -11,7 +11,7 @@
 	import { flattenLane } from '#lib/model/automation';
 	import { createPoint, simplifyPoints, type FlattenedPoint } from '#lib/model/curve';
 	import { centsBetween, clamp, formatHz, hzToNoteName } from '#lib/model/pitch';
-	import { createCurve } from '#lib/model/project';
+	import { createCurve, curveColorFor } from '#lib/model/project';
 	import { findScale } from '#lib/model/scale';
 	import { resolveMusicalState } from '#lib/model/musicalState';
 	import { targetsForState } from '#lib/model/tuning';
@@ -21,7 +21,8 @@
 		FrequencyProjection,
 		PitchMap,
 		PitchTarget,
-		SnapPitchMode
+		SnapPitchMode,
+		Track
 	} from '#lib/model/types';
 	import { CurveGeometryCache, viewportKey } from '#lib/editor/curveSampling';
 	import { hitTestCurves, hitTestHandles, hitTestPoints, pointPixel } from '#lib/editor/hitTesting';
@@ -34,6 +35,8 @@
 		addCurveToTrack,
 		addMarkerAt,
 		addPointAt,
+		attachPointToCurve,
+		branchCurveAtPoint,
 		deleteSelectedCurves,
 		joinCurves,
 		setCurvePoints,
@@ -42,6 +45,7 @@
 		updateCurve,
 		updateEditorSettings
 	} from '#lib/state/actions';
+	import type { PointHit } from '#lib/editor/hitTesting';
 	import {
 		activeTrack,
 		isMasterSelected,
@@ -60,10 +64,10 @@
 
 	const AXIS_WIDTH = 62;
 	const RULER_HEIGHT = 26;
-	const POINT_RADIUS_PX = 8;
-	const HANDLE_RADIUS_PX = 9;
+	const HANDLE_RADIUS_PX = 14;
 	/** pixel length of a default tangent handle at the current zoom */
 	const HANDLE_PIXELS = 34;
+	const POINT_IDLE_RADIUS_PX = 12;
 	const POINT_HIT_RADIUS_PX = 14;
 
 	/* ------------------------------------------------------------ geometry */
@@ -202,13 +206,38 @@
 		return session.snapEnabled && !modifiers.ctrl && !modifiers.meta;
 	}
 
-	/** Larger hit radius when the user is zoomed out, smaller on close-in you can't
-	 * reach — the reachable area tracks the pixel size the point is drawn at. */
+	/** Picking radius for a control point. Deliberately generous: a precision
+	 * editor should never make the user chase a 3px dot. */
 	function pointHitRadius(): number {
-		if (POINT_HIT_RADIUS_PX <= 0) return 0;
-		const zoom = Math.max(0.25, Math.min(session.viewport.pixelsPerBeat, 4));
-		// points are ~8 px diameter at mid zoom; this keeps them grab-able when small
-		return Math.round(POINT_HIT_RADIUS_PX * Math.sqrt(zoom / 1));
+		return POINT_HIT_RADIUS_PX;
+	}
+
+	/** Only the selected line's points are visible and grabbable. */
+	function isCurveSelected(curve: Curve): boolean {
+		return session.selectedCurveIds.includes(curve.id);
+	}
+
+	/** When the cursor misses every visible control point, grab the nearest one
+	 * on the selected line inside a slightly wider catchment. Keeps a hurried
+	 * click from falling through to region-select when the user meant a vertex. */
+	function nearestHitPoint(current: Track | null, x: number, y: number): PointHit | null {
+		if (!current) return null;
+		const radius = pointHitRadius() * 1.5;
+		let best: PointHit | null = null;
+		let bestDistance = Infinity;
+		for (const curve of current.curves) {
+			if (!isCurveSelected(curve)) continue;
+			for (let index = 0; index < curve.points.length; index++) {
+				const point = curve.points[index];
+				const pixel = pointPixel(point, transform);
+				const distance = Math.hypot(pixel.x - x, pixel.y - y);
+				if (distance <= radius && distance < bestDistance) {
+					best = { curve, point, index, distance };
+					bestDistance = distance;
+				}
+			}
+		}
+		return best;
 	}
 
 	/**
@@ -459,7 +488,7 @@
 		if (isMasterSelected()) {
 			drawMasterLanes(ctx, width, height);
 		} else if (track) {
-			drawTrackCurves(ctx, track.curves, track.color, width);
+			drawTrackCurves(ctx, track, width);
 		}
 
 		if (drag.mode === 'draw' && drag.drawSamples.length > 1) {
@@ -516,16 +545,11 @@
 		}
 	}
 
-	function drawTrackCurves(
-		ctx: CanvasRenderingContext2D,
-		curves: Curve[],
-		trackColor: string,
-		width: number
-	): void {
+	function drawTrackCurves(ctx: CanvasRenderingContext2D, track: Track, width: number): void {
 		const selectedCurves = new Set(session.selectedCurveIds);
 		const selectedPoints = new Set(session.selectedPointIds);
 
-		for (const curve of curves) {
+		for (const curve of track.curves) {
 			const previewPoints = drag.movedPoints.get(curve.id);
 			const pixels = previewPoints
 				? toPixels(previewPoints)
@@ -538,7 +562,7 @@
 
 			const isSelected = selectedCurves.has(curve.id);
 			const isHovered = hoverCurveId === curve.id;
-			const color = curve.color ?? trackColor;
+			const color = curveColorFor(track, curve);
 
 			ctx.save();
 			if (curve.muted) ctx.globalAlpha = 0.35;
@@ -558,17 +582,19 @@
 			ctx.setLineDash([]);
 			ctx.restore();
 
+			// control points belong to the selected line only, so a track with
+			// several lines never turns into a field of indistinguishable dots
+			if (!isSelected) continue;
+
 			const first = pixels[0];
 			const last = pixels[pixels.length - 1];
-			ctx.fillStyle = isSelected ? '#f0f3f8' : color;
+			ctx.fillStyle = '#f0f3f8';
 			ctx.beginPath();
 			ctx.arc(first.x, first.y, 2.6, 0, Math.PI * 2);
 			ctx.arc(last.x, last.y, 2.6, 0, Math.PI * 2);
 			ctx.fill();
 
 			const rendered = previewPoints ?? curve.points;
-			if (!isSelected && rendered.length > 6) continue;
-
 			for (const point of rendered) {
 				const pixel = pointPixel(point, transform);
 				if (pixel.x < -20 || pixel.x > width + 20) continue;
@@ -667,6 +693,16 @@
 		return hitTestCurves(geometries, x, y, 8);
 	}
 
+	/** Nearest line under the cursor other than `exceptCurveId`, for drop targets. */
+	function findOtherCurveHit(x: number, y: number, exceptCurveId: string) {
+		const current = track;
+		if (!current) return null;
+		const geometries = current.curves
+			.filter((curve) => curve.id !== exceptCurveId)
+			.map((curve) => ({ curve, geometry: geometryCache.get(curve, transform) }));
+		return hitTestCurves(geometries, x, y, 8);
+	}
+
 	function beginGesture(x: number, y: number, beat: number, frequency: number): void {
 		drag.originPointer = { x, y };
 		drag.originStartBeat = session.viewport.startBeat;
@@ -692,7 +728,7 @@
 		const current = track;
 
 		const pointHit = current
-			? hitTestPoints(current.curves, transform, x, y, pointHitRadius())
+			? hitTestPoints(current.curves, transform, x, y, pointHitRadius(), isCurveSelected)
 			: null;
 		const handleHit = current
 			? hitTestHandles(
@@ -704,7 +740,6 @@
 					HANDLE_RADIUS_PX
 				)
 			: null;
-
 		canvas.setPointerCapture(event.pointerId);
 		beginGesture(x, y, beat, frequency);
 
@@ -715,11 +750,10 @@
 			return;
 		}
 
-		const tool = session.activeTool;
-
-		// on miss in select/point/pencil mode, grab the nearest reachable control
-		// point so the other end of a short long bezier stays reachable
-		const nearestPoint = nearestHitPoint(current, x, y);
+		const tool = session.activeTool; // The pen tool always draws; select/point/eraser fall back to the nearest
+		// control point so a slightly-off click still lands on a vertex.
+		const nearestPoint = tool === 'draw' ? null : nearestHitPoint(current, x, y);
+		const hit = pointHit ?? nearestPoint;
 
 		if (handleHit && (tool === 'select' || tool === 'point')) {
 			drag.mode = 'handle';
@@ -731,33 +765,32 @@
 			return;
 		}
 
-		const hit = pointHit ?? nearestPoint;
 		if (hit && current) {
 			if (tool === 'eraser') {
-				const next = pointHit.curve.points.filter((point) => point.id !== pointHit.point.id);
+				const next = hit.curve.points.filter((point: CurvePoint) => point.id !== hit.point.id);
 				if (next.length >= 2) {
-					setCurvePoints(current.id, pointHit.curve.id, next, 'Delete point');
+					setCurvePoints(current.id, hit.curve.id, next, 'Delete point');
 				} else {
 					setStatus('A curve keeps at least two points');
 				}
 				return;
 			}
 			if (tool === 'select' || tool === 'point' || tool === 'draw') {
-				const already = session.selectedPointIds.includes(pointHit.point.id);
+				const already = session.selectedPointIds.includes(hit.point.id);
 				const nextSelection = modifiers.shift
 					? already
-						? session.selectedPointIds.filter((id) => id !== pointHit.point.id)
-						: [...session.selectedPointIds, pointHit.point.id]
+						? session.selectedPointIds.filter((id) => id !== hit.point.id)
+						: [...session.selectedPointIds, hit.point.id]
 					: already && session.selectedPointIds.length > 1
 						? session.selectedPointIds
-						: [pointHit.point.id];
-				selectCurves([pointHit.curve.id]);
+						: [hit.point.id];
+				selectCurves([hit.curve.id]);
 				selectPoints(nextSelection);
 				drag.mode = 'point';
-				drag.curveId = pointHit.curve.id;
-				drag.pointId = pointHit.point.id;
-				drag.startBeat = pointHit.point.time;
-				drag.startFrequency = pointHit.point.frequency;
+				drag.curveId = hit.curve.id;
+				drag.pointId = hit.point.id;
+				drag.startBeat = hit.point.time;
+				drag.startFrequency = hit.point.frequency;
 				for (const entry of current.curves) drag.basePoints.set(entry.id, entry.points);
 				dragActive = true;
 				return;
@@ -932,7 +965,7 @@
 		if (drag.mode === 'none') {
 			const current = track;
 			const pointHit = current
-				? hitTestPoints(current.curves, transform, x, y, POINT_RADIUS)
+				? hitTestPoints(current.curves, transform, x, y, POINT_IDLE_RADIUS_PX, isCurveSelected)
 				: null;
 			const nextHoverPoint = pointHit?.point.id ?? null;
 			if (nextHoverPoint !== hoverPointId) hoverPointId = nextHoverPoint;
@@ -994,18 +1027,35 @@
 		canvas.releasePointerCapture(event.pointerId);
 		const modifiers = modifiersFrom(event);
 		const current = track;
+		const { x, y } = localPoint(event);
 
 		switch (drag.mode) {
-			case 'point':
+			case 'point': {
+				const points = drag.curveId ? drag.movedPoints.get(drag.curveId) : undefined;
+				const movedPoint = points?.find((point) => point.id === drag.pointId);
+				if (points && drag.curveId && current) {
+					setCurvePoints(current.id, drag.curveId, points, 'Move point');
+				}
+				// dropping a point onto another line branches that line here and links
+				// the two, so the junction follows this point from now on
+				if (current && drag.curveId && drag.pointId && movedPoint) {
+					const target = findOtherCurveHit(x, y, drag.curveId);
+					if (target) {
+						attachPointToCurve(current.id, target.curve.id, {
+							curveId: drag.curveId,
+							pointId: drag.pointId,
+							time: movedPoint.time,
+							frequency: movedPoint.frequency
+						});
+						setStatus('Linked the two lines at this point');
+					}
+				}
+				break;
+			}
 			case 'handle': {
 				const points = drag.curveId ? drag.movedPoints.get(drag.curveId) : undefined;
 				if (points && drag.curveId && current) {
-					setCurvePoints(
-						current.id,
-						drag.curveId,
-						points,
-						drag.mode === 'handle' ? 'Adjust curvature' : 'Move point'
-					);
+					setCurvePoints(current.id, drag.curveId, points, 'Adjust curvature');
 				}
 				break;
 			}
@@ -1102,7 +1152,14 @@
 		if (!current) return;
 		const { x, y } = localPoint(event);
 		const modifiers = modifiersFrom(event);
-		const pointHit = hitTestPoints(current.curves, transform, x, y, POINT_RADIUS + 1);
+		const pointHit = hitTestPoints(
+			current.curves,
+			transform,
+			x,
+			y,
+			POINT_IDLE_RADIUS_PX + 1,
+			isCurveSelected
+		);
 		if (pointHit) {
 			const order = ['linear', 'smooth', 'bezier'] as const;
 			const next = order[(order.indexOf(pointHit.point.interpolation) + 1) % order.length];
@@ -1134,7 +1191,7 @@
 		const items: MenuItem[] = [];
 
 		const pointHit = current
-			? hitTestPoints(current.curves, transform, x, y, POINT_RADIUS + 1)
+			? hitTestPoints(current.curves, transform, x, y, POINT_IDLE_RADIUS_PX + 1, isCurveSelected)
 			: null;
 		const curveHit = pointHit ? null : findCurveHit(x, y);
 
@@ -1157,6 +1214,13 @@
 							),
 							'Point interpolation'
 						);
+					}
+				},
+				{
+					label: 'Branch from here',
+					action: () => {
+						branchCurveAtPoint(current.id, curve.id, point.id);
+						setStatus('Branched a new voice from this point — both start in phase');
 					}
 				},
 				{
@@ -1415,8 +1479,8 @@
 				</label>
 			{/if}
 			<span class="hint"
-				>Ctrl/Cmd detunes freely · Alt zooms pitch · Shift scrolls time · N snaps selection to note
-				Hz · Root {rootLabel}</span
+				>Click a line to edit its points · drag a point onto another line to link them · Ctrl/Cmd
+				detunes · Alt zooms pitch · Shift scrolls time · N snaps to note Hz · Root {rootLabel}</span
 			>
 		</div>
 
