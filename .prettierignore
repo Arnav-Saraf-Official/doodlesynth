@@ -1,0 +1,13 @@
+# Package Managers
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+bun.lock
+bun.lockb
+
+# Miscellaneous
+/static/
+
+# Vendored agent/reference documentation: some of these files embed diff-style
+# markers inside code fences, which Prettier's markdown parser cannot read.
+/.github/
