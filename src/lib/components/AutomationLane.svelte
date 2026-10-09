@@ -414,6 +414,8 @@
 		align-content: center;
 		gap: 0 var(--sp-2);
 		padding: 3px var(--sp-3) 3px var(--sp-4);
+		width: 148px;
+		box-sizing: border-box;
 		border-right: 1px solid var(--color-line-0);
 		background: var(--color-bg-1);
 		flex: none;

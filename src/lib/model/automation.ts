@@ -23,7 +23,8 @@ export function createAutomationLane(target: ParameterKey): AutomationLane {
 		target,
 		points: [],
 		enabled: true,
-		expanded: false
+		// new lanes open at full height so they are immediately drawable
+		expanded: true
 	};
 }
 

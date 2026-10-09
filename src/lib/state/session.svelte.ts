@@ -16,6 +16,7 @@ import {
 	createDefaultProject,
 	createTrack,
 	growDurationForContent,
+	migrateProject,
 	nextTrackColor,
 	reconcilePointLinks
 } from '#lib/model/project';
@@ -70,6 +71,8 @@ export interface Session {
 	automationTrackIds: string[];
 	/** drag-resizable height of the automation lane list, in px */
 	automationPanelHeight: number;
+	/** per-group automation lane region height (px), keyed by track id */
+	automationLaneHeights: Record<string, number>;
 	/** clipboard for curve/point copy-paste */
 	clipboard: { curves: Curve[]; atBeat: number } | null;
 }
@@ -96,6 +99,7 @@ export const session = $state<Session>({
 	showOnboarding: false,
 	automationTrackIds: [],
 	automationPanelHeight: 200,
+	automationLaneHeights: {},
 	clipboard: null
 });
 
@@ -149,7 +153,8 @@ export function mutate(
 }
 
 export function replaceProject(project: Project, options: { resetHistory?: boolean } = {}): void {
-	applyProject(project);
+	// heal schema drift from older saves before the project becomes authoritative
+	applyProject(migrateProject(project));
 	if (options.resetHistory !== false) history.clear();
 	session.selectedCurveIds = [];
 	session.selectedPointIds = [];

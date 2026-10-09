@@ -477,8 +477,14 @@ class PlaybackGraph {
 		const curve = this.curveOf(voice);
 		if (!track || !curve) return 440;
 		const beat = this.beatAtTime(time);
-		let hz = sampleFrequencyAt(curve.points, beat);
-		const semis = track.synth.pitchOffsetSemitones + track.synth.fineCents / 100;
+		const lanes = track.automationLanes;
+		// pitch and tuning are automatable per track, on top of the static values
+		const offset = this.laneValue(lanes, 'pitch.offset', track.synth.pitchOffsetSemitones, beat);
+		const fine = this.laneValue(lanes, 'pitch.fine', track.synth.fineCents, beat);
+		const cents = this.laneValue(lanes, 'tuning.cents', 0, beat);
+		const ratio = this.laneValue(lanes, 'tuning.ratio', 1, beat);
+		let hz = sampleFrequencyAt(curve.points, beat) * ratio;
+		const semis = offset + (fine + cents) / 100;
 		if (semis !== 0) hz *= Math.pow(2, semis / 12);
 		return clamp(hz, 0.01, 20000);
 	}

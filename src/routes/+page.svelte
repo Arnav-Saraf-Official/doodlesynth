@@ -4,8 +4,8 @@
 	import AutomationPanel from '#lib/components/AutomationPanel.svelte';
 	import TopBar from '#lib/components/TopBar.svelte';
 	import TrackInspector from '#lib/components/TrackInspector.svelte';
+	import MasterTimeline from '#lib/components/MasterTimeline.svelte';
 	import TrackMixer from '#lib/components/TrackMixer.svelte';
-	import TrackOverview from '#lib/components/TrackOverview.svelte';
 	import TrackTabs from '#lib/components/TrackTabs.svelte';
 	import {
 		copySelection,
@@ -237,16 +237,8 @@
 	<div class="main">
 		<div class="editor-column">
 			{#if isMasterSelected()}
-				<!-- Master: tracks and effect automation only, no pitch curve editor -->
-				<TrackOverview />
-				<AutomationPanel
-					trackId={MASTER_TRACK_ID}
-					width={session.viewport.width}
-					startBeat={session.viewport.startBeat}
-					pixelsPerBeat={session.viewport.pixelsPerBeat}
-					playhead={session.playhead}
-					{snapBeats}
-				/>
+				<!-- Master: a stacked automation timeline — MASTER row on top, then every track -->
+				<MasterTimeline {snapBeats} />
 			{:else}
 				<CurveEditor />
 				<AutomationPanel

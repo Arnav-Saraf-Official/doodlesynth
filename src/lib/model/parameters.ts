@@ -99,6 +99,28 @@ export const PARAMETERS: ParameterDefinition[] = [
 		scope: 'track'
 	},
 	{
+		key: 'tuning.ratio',
+		label: 'Tuning Ratio',
+		group: 'tuning',
+		min: 0.25,
+		max: 4,
+		defaultValue: 1,
+		unit: 'x',
+		scale: 'linear',
+		scope: 'track'
+	},
+	{
+		key: 'tuning.cents',
+		label: 'Tuning Cents',
+		group: 'tuning',
+		min: -1200,
+		max: 1200,
+		defaultValue: 0,
+		unit: '¢',
+		scale: 'linear',
+		scope: 'track'
+	},
+	{
 		key: 'fx.delay.mix',
 		label: 'Delay Mix',
 		group: 'fx',

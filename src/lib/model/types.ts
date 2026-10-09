@@ -389,11 +389,11 @@ export interface ProjectSummary {
 export interface ParameterDefinition {
 	key: ParameterKey;
 	label: string;
-	group: 'mix' | 'filter' | 'fx' | 'pitch' | 'modulation' | 'source';
+	group: 'mix' | 'filter' | 'fx' | 'pitch' | 'tuning' | 'modulation' | 'source';
 	min: number;
 	max: number;
 	defaultValue: number;
-	unit: '' | 'Hz' | 'dB' | '%' | 's' | 'st' | '¢';
+	unit: '' | 'Hz' | 'dB' | '%' | 's' | 'st' | '¢' | 'x';
 	/** how the automation lane draws and interpolates its vertical axis */
 	scale: 'linear' | 'logarithmic';
 	scope: 'master' | 'track' | 'both';

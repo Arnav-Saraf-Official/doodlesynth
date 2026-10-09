@@ -13,6 +13,7 @@ import { DEFAULT_TUNING, cloneTuning } from './tuning';
 import { createBuiltInScales } from './scale';
 import { createBuiltInWavetables, refreshFrameSamples, DEFAULT_SAMPLE_LENGTH } from './wavetable';
 import type {
+	AutomationLane,
 	Curve,
 	CurvePoint,
 	EditorSettings,
@@ -28,7 +29,7 @@ import type {
 	WaveSource
 } from './types';
 
-export const PROJECT_VERSION = 1;
+export const PROJECT_VERSION = 2;
 
 export const TRACK_COLORS = [
 	'#4da3ff',
@@ -97,6 +98,31 @@ export function reconcilePointLinks(project: Project): Project {
 		return { ...track, curves };
 	});
 	return changed ? { ...project, tracks } : project;
+}
+
+/**
+ * Bring a stored project up to the current schema.
+ *
+ * v1 could persist automation lanes collapsed by default, which left them as
+ * unusable 20px strips on every reload. v2 opens those lanes back up so freshly
+ * loaded projects always show full-height automation. Idempotent: a project at
+ * the current version is returned untouched.
+ */
+export function migrateProject(project: Project): Project {
+	if (project.version >= PROJECT_VERSION) return project;
+	const expand = (lanes: AutomationLane[]) =>
+		lanes.map((lane) => (lane.expanded === false ? { ...lane, expanded: true } : lane));
+	const masterLanes = expand(project.master.automationLanes);
+	const master = masterLanes.some((lane, index) => lane !== project.master.automationLanes[index])
+		? { ...project.master, automationLanes: masterLanes }
+		: project.master;
+	const tracks = project.tracks.map((track) => {
+		const lanes = expand(track.automationLanes);
+		return lanes.some((lane, index) => lane !== track.automationLanes[index])
+			? { ...track, automationLanes: lanes }
+			: track;
+	});
+	return { ...project, version: PROJECT_VERSION, master, tracks };
 }
 
 export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
