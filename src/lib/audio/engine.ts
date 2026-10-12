@@ -18,11 +18,18 @@
 
 import { sampleLane } from '#lib/model/automation';
 import { curveBounds, sampleFrequencyAt } from '#lib/model/curve';
+import {
+	envelopeValueAt,
+	lastTriggerIndex,
+	modulateParameter,
+	triggerBeatsFor
+} from '#lib/model/modEnvelope';
 import { findParameter } from '#lib/model/parameters';
 import { findWavetable, renderFrameSource, renderWavetableAt } from '#lib/model/wavetable';
 import type {
 	AutomationLane,
 	Curve,
+	ModEnvelope,
 	Project,
 	SynthSettings,
 	Track,
@@ -39,6 +46,7 @@ const RAMP_CHUNK_SECONDS = 0.05;
 const OFFLINE_SAMPLE_RATE = 48000;
 /** voices above this count are dropped when a track has too many curves */
 const MAX_VOICES = 64;
+const MAX_UNISON_VOICES = 7;
 
 export interface EngineDebug {
 	playing: boolean;
@@ -218,13 +226,20 @@ interface TrackChain {
 	reverbSend: GainNode;
 }
 
+/** One oscillator of a (possibly unison-stacked) voice. */
+interface VoiceSource {
+	node: AudioScheduledSourceNode;
+	/** automation-controlled pitch rate, null for noise sources */
+	pitch: AudioParam | null;
+	/** unison detune multiplier applied to the voice pitch */
+	ratio: number;
+}
+
 interface Voice {
 	curveId: string;
 	trackId: string;
-	source: AudioScheduledSourceNode;
+	sources: VoiceSource[];
 	gain: GainNode;
-	/** automation-controlled pitch rate, null for noise sources */
-	pitch: AudioParam | null;
 	bounds: { startTime: number; endTime: number };
 	wave: SynthSettings['wave'];
 	wavetablePosition: number;
@@ -269,6 +284,9 @@ class PlaybackGraph {
 	private readonly analyserData: Float32Array<ArrayBuffer> | null;
 	private structureKey = '';
 	private lastDrive = new Map<string, number>();
+	private lastFilterType = new Map<string, string>();
+	/** envelope runtimes, recomputed once per schedule window */
+	private modEnv = new Map<string, { envelope: ModEnvelope; triggers: number[] }[]>();
 
 	constructor(ctx: BaseAudioContext, project: Project, startBeat: number, startTime: number) {
 		this.ctx = ctx;
@@ -332,9 +350,12 @@ class PlaybackGraph {
 				.filter((curve) => curve.points.length > 0 && !curve.muted)
 				.map((curve) => `${curve.id}:${Number((curve.phaseRandomization ?? 0).toFixed(3))}`);
 			if (curves.length === 0) continue;
+			const unison = track.synth.unison;
 			parts.push(
 				`${track.id}:${track.synth.wave}:${track.synth.wavetableId ?? ''}:${Number(
 					track.synth.wavetablePosition.toFixed(2)
+				)}:${unison?.voices ?? 1}:${Number((unison?.detuneCents ?? 0).toFixed(1))}:${Number(
+					(unison?.phaseSpread ?? 0).toFixed(2)
 				)}:${curves.join(',')}`
 			);
 		}
@@ -348,7 +369,6 @@ class PlaybackGraph {
 			null
 		);
 	}
-
 	private createVoice(track: Track, curve: Curve): Voice | null {
 		const ctx = this.ctx;
 		const synth = track.synth;
@@ -356,54 +376,73 @@ class PlaybackGraph {
 		const gain = ctx.createGain();
 		gain.gain.value = 0;
 
+		// white noise is already decorrelated per cycle; stacking it adds nothing
+		const unison = synth.unison;
+		const voiceCount =
+			synth.wave === 'white-noise'
+				? 1
+				: clamp(Math.round(unison?.voices ?? 1), 1, MAX_UNISON_VOICES);
+		const detuneCents = clamp(unison?.detuneCents ?? 0, 0, 100);
+		const phaseSpread = clamp(unison?.phaseSpread ?? 0, 0, 1);
+
 		const key = `${track.id}:${curve.id}:${synth.wave}:${synth.wavetableId ?? ''}:${Number(
 			synth.wavetablePosition.toFixed(2)
-		)}`;
+		)}:${voiceCount}`;
 
-		let source: AudioScheduledSourceNode;
-		let pitch: AudioParam | null = null;
-		const phase = phaseFraction(curve);
-		let startOffset = 0;
+		const sources: VoiceSource[] = [];
+		const basePhase = phaseFraction(curve);
+		for (let index = 0; index < voiceCount; index++) {
+			// spread voices evenly across ±detuneCents, centred on the pitch
+			const offset = voiceCount === 1 ? 0 : (index / (voiceCount - 1)) * 2 - 1;
+			const ratio = Math.pow(2, (offset * detuneCents) / 1200);
+			const phase =
+				voiceCount === 1 ? basePhase : (basePhase + (index / voiceCount) * phaseSpread) % 1;
 
-		if (synth.wave === 'white-noise') {
-			if (!this.noiseBuffer) return null;
-			const noise = ctx.createBufferSource();
-			noise.buffer = this.noiseBuffer;
-			noise.loop = true;
-			source = noise;
-		} else if (synth.wave === 'wavetable') {
-			const table = this.tableFor(synth);
-			if (!table) return null;
-			const cycle = ctx.createBufferSource();
-			cycle.buffer = tableCycle(ctx, table, synth.wavetablePosition);
-			cycle.loop = true;
-			pitch = cycle.playbackRate;
-			// offset into the looping cycle is an exact phase shift
-			if (phase > 0) startOffset = phase * cycle.buffer.duration;
-			source = cycle;
-		} else {
-			const oscillator = ctx.createOscillator();
-			if (phase > 0) oscillator.setPeriodicWave(phaseShiftedWave(ctx, synth.wave, phase));
-			else if (synth.wave === 'pulse') oscillator.setPeriodicWave(this.pulse);
-			else if (synth.wave === 'saw') oscillator.type = 'sawtooth';
-			else oscillator.type = synth.wave;
-			pitch = oscillator.frequency;
-			source = oscillator;
+			let node: AudioScheduledSourceNode;
+			let pitch: AudioParam | null = null;
+			let startOffset = 0;
+
+			if (synth.wave === 'white-noise') {
+				if (!this.noiseBuffer) return null;
+				const noise = ctx.createBufferSource();
+				noise.buffer = this.noiseBuffer;
+				noise.loop = true;
+				node = noise;
+			} else if (synth.wave === 'wavetable') {
+				const table = this.tableFor(synth);
+				if (!table) return null;
+				const cycle = ctx.createBufferSource();
+				cycle.buffer = tableCycle(ctx, table, synth.wavetablePosition);
+				cycle.loop = true;
+				pitch = cycle.playbackRate;
+				// offset into the looping cycle is an exact phase shift
+				if (phase > 0) startOffset = phase * cycle.buffer.duration;
+				node = cycle;
+			} else {
+				const oscillator = ctx.createOscillator();
+				if (phase > 0) oscillator.setPeriodicWave(phaseShiftedWave(ctx, synth.wave, phase));
+				else if (synth.wave === 'pulse') oscillator.setPeriodicWave(this.pulse);
+				else if (synth.wave === 'saw') oscillator.type = 'sawtooth';
+				else oscillator.type = synth.wave;
+				pitch = oscillator.frequency;
+				node = oscillator;
+			}
+
+			node.connect(gain);
+			try {
+				if (startOffset > 0) (node as AudioBufferSourceNode).start(this.startTime, startOffset);
+				else node.start(this.startTime);
+			} catch {
+				return null;
+			}
+			sources.push({ node, pitch, ratio });
 		}
 
-		source.connect(gain);
-		try {
-			if (startOffset > 0) (source as AudioBufferSourceNode).start(this.startTime, startOffset);
-			else source.start(this.startTime);
-		} catch {
-			return null;
-		}
 		return {
 			curveId: curve.id,
 			trackId: track.id,
-			source,
+			sources,
 			gain,
-			pitch,
 			bounds,
 			wave: synth.wave,
 			wavetablePosition: synth.wavetablePosition,
@@ -413,13 +452,15 @@ class PlaybackGraph {
 
 	private rebuildVoices(): void {
 		for (const voice of this.voices) {
-			try {
-				voice.source.stop();
-			} catch {
-				// already stopped
+			for (const source of voice.sources) {
+				try {
+					source.node.stop();
+				} catch {
+					// already stopped
+				}
+				source.node.disconnect();
 			}
 			voice.gain.disconnect();
-			voice.source.disconnect();
 		}
 		this.voices.length = 0;
 		this.tracks.clear();
@@ -456,6 +497,31 @@ class PlaybackGraph {
 		return this.project.tracks.find((track) => track.id === id);
 	}
 
+	/**
+	 * The biquad type is discrete, so it is applied out of band rather than
+	 * scheduled. A disabled filter is forced fully transparent — otherwise a
+	 * filter that was last heard at 300 Hz keeps cutting after it is switched
+	 * off, which was the master-bus bug.
+	 */
+	private syncFilterType(
+		chain: BiquadFilterNode,
+		key: string,
+		type: BiquadFilterType,
+		enabled: boolean
+	): void {
+		const desired: BiquadFilterType = enabled ? type : 'lowpass';
+		if (this.lastFilterType.get(key) !== desired) {
+			this.lastFilterType.set(key, desired);
+			chain.type = desired;
+		}
+		if (enabled) return;
+		const now = this.ctx.currentTime;
+		chain.frequency.cancelScheduledValues(now);
+		chain.Q.cancelScheduledValues(now);
+		chain.frequency.value = 20000;
+		chain.Q.value = 0.0001;
+	}
+
 	private curveOf(voice: Voice): Curve | undefined {
 		return this.trackById(voice.trackId)?.curves.find((curve) => curve.id === voice.curveId);
 	}
@@ -471,6 +537,54 @@ class PlaybackGraph {
 		return sampleLane(lane, beat);
 	}
 
+	/**
+	 * Recompute envelope runtimes once per schedule window: trigger detection
+	 * walks curve points, which is far too cheap to do per audio sample but
+	 * still worth hoisting out of the sampler closures.
+	 */
+	private refreshModEnvelopes(): void {
+		this.modEnv.clear();
+		const build = (envelopes: ModEnvelope[] | undefined, curves: Curve[]) => {
+			const list = (envelopes ?? []).filter((envelope) => envelope.enabled);
+			return list.map((envelope) => {
+				const triggers = triggerBeatsFor(curves, envelope.trigger);
+				// every envelope also fires once when the transport starts
+				triggers.push(this.startBeat);
+				triggers.sort((a, b) => a - b);
+				return { envelope, triggers };
+			});
+		};
+		const master = build(this.project.master.modEnvelopes, []);
+		if (master.length) this.modEnv.set('master', master);
+		for (const track of this.project.tracks) {
+			const list = build(track.modEnvelopes, track.curves);
+			if (list.length) this.modEnv.set(track.id, list);
+		}
+	}
+
+	/** Automation value with every enabled envelope for `scopeId` folded in. */
+	private envelopedValue(
+		scopeId: string,
+		lanes: AutomationLane[],
+		key: string,
+		fallback: number,
+		beat: number
+	): number {
+		const base = this.laneValue(lanes, key, fallback, beat);
+		const runtimes = this.modEnv.get(scopeId);
+		if (!runtimes) return base;
+		let mod = 0;
+		for (const runtime of runtimes) {
+			if (runtime.envelope.destination !== key) continue;
+			const index = lastTriggerIndex(runtime.triggers, beat);
+			if (index < 0) continue;
+			const level = envelopeValueAt(runtime.envelope, beat - runtime.triggers[index]);
+			if (level > 0) mod += level * runtime.envelope.amount;
+		}
+		if (mod === 0) return base;
+		return modulateParameter(key, base, mod);
+	}
+
 	/** Pitch of a voice in Hz at a context time, including track tune offsets. */
 	private voicePitch(voice: Voice, time: number): number {
 		const track = this.trackById(voice.trackId);
@@ -479,8 +593,14 @@ class PlaybackGraph {
 		const beat = this.beatAtTime(time);
 		const lanes = track.automationLanes;
 		// pitch and tuning are automatable per track, on top of the static values
-		const offset = this.laneValue(lanes, 'pitch.offset', track.synth.pitchOffsetSemitones, beat);
-		const fine = this.laneValue(lanes, 'pitch.fine', track.synth.fineCents, beat);
+		const offset = this.envelopedValue(
+			track.id,
+			lanes,
+			'pitch.offset',
+			track.synth.pitchOffsetSemitones,
+			beat
+		);
+		const fine = this.envelopedValue(track.id, lanes, 'pitch.fine', track.synth.fineCents, beat);
 		const cents = this.laneValue(lanes, 'tuning.cents', 0, beat);
 		const ratio = this.laneValue(lanes, 'tuning.ratio', 1, beat);
 		let hz = sampleFrequencyAt(curve.points, beat) * ratio;
@@ -527,6 +647,7 @@ class PlaybackGraph {
 	/** Schedule every automatable parameter for [from, to]. */
 	schedule(from: number, to: number, cancel = true): void {
 		if (to <= from) return;
+		this.refreshModEnvelopes();
 		const nowBeat = this.beatAtTime(from);
 		const master = this.project.master;
 
@@ -535,7 +656,8 @@ class PlaybackGraph {
 			this.master.gain.gain,
 			(time) =>
 				dbToGain(
-					this.laneValue(
+					this.envelopedValue(
+						'master',
 						master.automationLanes,
 						'volume',
 						master.mixer.volumeDb,
@@ -550,7 +672,13 @@ class PlaybackGraph {
 			this.master.panner.pan,
 			(time) =>
 				clamp(
-					this.laneValue(master.automationLanes, 'pan', master.mixer.pan, this.beatAtTime(time)),
+					this.envelopedValue(
+						'master',
+						master.automationLanes,
+						'pan',
+						master.mixer.pan,
+						this.beatAtTime(time)
+					),
 					-1,
 					1
 				),
@@ -559,12 +687,14 @@ class PlaybackGraph {
 			{ cancel }
 		);
 		const masterFilter = master.synth.filter;
+		this.syncFilterType(this.master.filter, 'master', masterFilter.type, masterFilter.enabled);
 		if (masterFilter.enabled) {
 			this.scheduleParam(
 				this.master.filter.frequency,
 				(time) =>
 					clamp(
-						this.laneValue(
+						this.envelopedValue(
+							'master',
 							master.automationLanes,
 							'filter.cutoff',
 							masterFilter.cutoff,
@@ -581,7 +711,8 @@ class PlaybackGraph {
 				this.master.filter.Q,
 				(time) =>
 					clamp(
-						this.laneValue(
+						this.envelopedValue(
+							'master',
 							master.automationLanes,
 							'filter.resonance',
 							masterFilter.resonance,
@@ -599,7 +730,8 @@ class PlaybackGraph {
 			this.master.delaySend.gain,
 			(time) =>
 				clamp(
-					this.laneValue(
+					this.envelopedValue(
+						'master',
 						master.automationLanes,
 						'fx.delay.mix',
 						master.synth.delay.mix,
@@ -616,7 +748,8 @@ class PlaybackGraph {
 			this.master.reverbSend.gain,
 			(time) =>
 				clamp(
-					this.laneValue(
+					this.envelopedValue(
+						'master',
 						master.automationLanes,
 						'fx.reverb.mix',
 						master.synth.reverb.mix,
@@ -633,7 +766,8 @@ class PlaybackGraph {
 		this.master.delay.delayTime.value = clamp(master.synth.delay.time, 0.01, 2);
 		this.master.delayFeedback.gain.value = clamp(master.synth.delay.feedback, 0, 0.95);
 		// master drive is a curve, not a value: refresh when the amount moves
-		const masterDrive = this.laneValue(
+		const masterDrive = this.envelopedValue(
+			'master',
 			master.automationLanes,
 			'filter.drive',
 			master.synth.drive,
@@ -650,11 +784,14 @@ class PlaybackGraph {
 			this.scheduleParam(voice.gain.gain, (time) => this.voiceLevel(voice, time), from, to, {
 				cancel
 			});
-			if (voice.pitch) {
+			for (const source of voice.sources) {
+				if (!source.pitch) continue;
 				this.scheduleParam(
-					voice.pitch,
+					source.pitch,
 					(time) =>
-						voice.wave === 'wavetable' ? this.waveRate(voice, time) : this.voicePitch(voice, time),
+						(voice.wave === 'wavetable'
+							? this.waveRate(voice, time)
+							: this.voicePitch(voice, time)) * source.ratio,
 					from,
 					to,
 					{ cancel }
@@ -668,10 +805,19 @@ class PlaybackGraph {
 			if (!track) continue;
 			const synth = track.synth;
 			const lanes = track.automationLanes;
+			this.syncFilterType(chain.filter, trackId, synth.filter.type, synth.filter.enabled);
 			this.scheduleParam(
 				chain.gain.gain,
 				(time) =>
-					dbToGain(this.laneValue(lanes, 'volume', track.mixer.volumeDb, this.beatAtTime(time))),
+					dbToGain(
+						this.envelopedValue(
+							trackId,
+							lanes,
+							'volume',
+							track.mixer.volumeDb,
+							this.beatAtTime(time)
+						)
+					),
 				from,
 				to,
 				{ cancel }
@@ -679,7 +825,11 @@ class PlaybackGraph {
 			this.scheduleParam(
 				chain.panner.pan,
 				(time) =>
-					clamp(this.laneValue(lanes, 'pan', track.mixer.pan, this.beatAtTime(time)), -1, 1),
+					clamp(
+						this.envelopedValue(trackId, lanes, 'pan', track.mixer.pan, this.beatAtTime(time)),
+						-1,
+						1
+					),
 				from,
 				to,
 				{ cancel }
@@ -689,7 +839,13 @@ class PlaybackGraph {
 					chain.filter.frequency,
 					(time) =>
 						clamp(
-							this.laneValue(lanes, 'filter.cutoff', synth.filter.cutoff, this.beatAtTime(time)),
+							this.envelopedValue(
+								trackId,
+								lanes,
+								'filter.cutoff',
+								synth.filter.cutoff,
+								this.beatAtTime(time)
+							),
 							20,
 							20000
 						),
@@ -701,7 +857,8 @@ class PlaybackGraph {
 					chain.filter.Q,
 					(time) =>
 						clamp(
-							this.laneValue(
+							this.envelopedValue(
+								trackId,
 								lanes,
 								'filter.resonance',
 								synth.filter.resonance,
@@ -719,7 +876,13 @@ class PlaybackGraph {
 				chain.delaySend.gain,
 				(time) =>
 					clamp(
-						this.laneValue(lanes, 'fx.delay.mix', synth.delay.mix, this.beatAtTime(time)),
+						this.envelopedValue(
+							trackId,
+							lanes,
+							'fx.delay.mix',
+							synth.delay.mix,
+							this.beatAtTime(time)
+						),
 						0,
 						1
 					),
@@ -731,7 +894,13 @@ class PlaybackGraph {
 				chain.reverbSend.gain,
 				(time) =>
 					clamp(
-						this.laneValue(lanes, 'fx.reverb.mix', synth.reverb.mix, this.beatAtTime(time)),
+						this.envelopedValue(
+							trackId,
+							lanes,
+							'fx.reverb.mix',
+							synth.reverb.mix,
+							this.beatAtTime(time)
+						),
 						0,
 						1
 					),
@@ -740,7 +909,7 @@ class PlaybackGraph {
 				{ cancel }
 			);
 			// drive is a curve, not a value: refresh it when the amount moved
-			const drive = this.laneValue(lanes, 'filter.drive', synth.drive, nowBeat);
+			const drive = this.envelopedValue(trackId, lanes, 'filter.drive', synth.drive, nowBeat);
 			const lastDrive = this.lastDrive.get(trackId) ?? -1;
 			if (Math.abs(drive - lastDrive) > 0.005) {
 				this.lastDrive.set(trackId, drive);
@@ -771,12 +940,14 @@ class PlaybackGraph {
 
 	dispose(): void {
 		for (const voice of this.voices) {
-			try {
-				voice.source.stop();
-			} catch {
-				// already stopped
+			for (const source of voice.sources) {
+				try {
+					source.node.stop();
+				} catch {
+					// already stopped
+				}
+				source.node.disconnect();
 			}
-			voice.source.disconnect();
 			voice.gain.disconnect();
 		}
 		this.voices.length = 0;

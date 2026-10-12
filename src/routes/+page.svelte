@@ -5,6 +5,7 @@
 	import TopBar from '#lib/components/TopBar.svelte';
 	import TrackInspector from '#lib/components/TrackInspector.svelte';
 	import MasterTimeline from '#lib/components/MasterTimeline.svelte';
+	import MidiEditor from '#lib/components/MidiEditor.svelte';
 	import TrackMixer from '#lib/components/TrackMixer.svelte';
 	import TrackTabs from '#lib/components/TrackTabs.svelte';
 	import {
@@ -27,6 +28,7 @@
 	import {
 		activeTrack,
 		initSession,
+		persistPreferences,
 		isMasterSelected,
 		MASTER_TRACK_ID,
 		redo,
@@ -66,6 +68,21 @@
 		{ tool: 'automation', label: 'Automation', keys: '', icon: 'M1 10c3 0 3-6 6-6s3 6 6 6' },
 		{ tool: 'measure', label: 'Measure', keys: '', icon: 'M1 9l5-6M2 4h4M8 4h4M2 9h4' }
 	];
+
+	const NOTE_LENGTHS = [
+		{ label: '1/1', beats: 4 },
+		{ label: '1/2', beats: 2 },
+		{ label: '1/4', beats: 1 },
+		{ label: '1/8', beats: 0.5 },
+		{ label: '1/16', beats: 0.25 },
+		{ label: '1/32', beats: 0.125 }
+	];
+	let midiNoteBeats = $state(1);
+
+	function toggleEditorMode() {
+		session.editorMode = session.editorMode === 'midi' ? 'curve' : 'midi';
+		persistPreferences();
+	}
 
 	const track = $derived(activeTrack());
 	const automationTrackId = $derived(session.selectedTrackId);
@@ -221,6 +238,15 @@
 		</div>
 
 		<div class="tool-strip-right">
+			{#if !isMasterSelected()}
+				<IconButton
+					label={session.editorMode === 'midi' ? 'Curve editor' : 'MIDI note editor'}
+					active={session.editorMode === 'midi'}
+					onclick={toggleEditorMode}
+				>
+					{session.editorMode === 'midi' ? 'Curves' : 'MIDI'}
+				</IconButton>
+			{/if}
 			<TrackMixer trackId={session.selectedTrackId} accent={automationAccent} compact={true} />
 			<IconButton
 				label="Toggle inspector (I)"
@@ -240,7 +266,29 @@
 				<!-- Master: a stacked automation timeline — MASTER row on top, then every track -->
 				<MasterTimeline {snapBeats} />
 			{:else}
-				<CurveEditor />
+				{#if session.editorMode === 'midi'}
+					<div class="midi-bar" role="toolbar" aria-label="MIDI note length">
+						<span class="midi-bar-label">Note length</span>
+						{#each NOTE_LENGTHS as option (option.beats)}
+							<button
+								type="button"
+								class="note-chip"
+								class:is-active={midiNoteBeats === option.beats}
+								aria-pressed={midiNoteBeats === option.beats}
+								title={`${option.beats} beats`}
+								onclick={() => (midiNoteBeats = option.beats)}
+							>
+								{option.label}
+							</button>
+						{/each}
+						<span class="midi-hint num">
+							double-click adds · drag moves · drag edges resizes · Delete removes
+						</span>
+					</div>
+					<MidiEditor noteBeats={midiNoteBeats} />
+				{:else}
+					<CurveEditor />
+				{/if}
 				<AutomationPanel
 					trackId={automationTrackId}
 					width={session.viewport.width}
@@ -439,5 +487,57 @@
 		.tool-label {
 			display: none;
 		}
+	}
+	.midi-bar {
+		display: flex;
+		align-items: center;
+		gap: var(--sp-2);
+		height: 30px;
+		padding: 0 var(--sp-3);
+		border-bottom: 1px solid var(--color-line-0);
+		background: var(--color-bg-1);
+		flex: none;
+	}
+
+	.midi-bar-label {
+		font-size: 10.5px;
+		font-weight: 600;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--color-fg-3);
+	}
+
+	.note-chip {
+		min-width: 34px;
+		height: 20px;
+		padding: 0 6px;
+		border: 1px solid var(--color-line-0);
+		border-radius: var(--r-1);
+		background: var(--color-bg-2);
+		color: var(--color-fg-2);
+		font-size: 10.5px;
+		font-family: ui-monospace, monospace;
+		cursor: pointer;
+		transition:
+			background-color 120ms var(--ease-out),
+			color 120ms var(--ease-out),
+			border-color 120ms var(--ease-out);
+	}
+
+	.note-chip:hover {
+		background: var(--color-bg-3);
+		color: var(--color-fg-0);
+	}
+
+	.note-chip.is-active {
+		background: color-mix(in oklab, var(--color-accent) 24%, var(--color-bg-2));
+		border-color: color-mix(in oklab, var(--color-accent) 55%, var(--color-line-1));
+		color: var(--color-fg-0);
+	}
+
+	.midi-hint {
+		margin-left: auto;
+		font-size: 9.5px;
+		color: var(--color-fg-3);
 	}
 </style>

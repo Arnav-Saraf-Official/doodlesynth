@@ -47,6 +47,7 @@ import {
 	createWavetable,
 	refreshFrameSamples
 } from '#lib/model/wavetable';
+import { createModEnvelope } from '#lib/model/modEnvelope';
 import type {
 	AutomationLane,
 	Curve,
@@ -54,6 +55,7 @@ import type {
 	EditorSettings,
 	Id,
 	Lfo,
+	ModEnvelope,
 	MusicalState,
 	MusicalStateKeyframe,
 	ParameterKey,
@@ -62,6 +64,7 @@ import type {
 	ScaleDefinition,
 	SynthSettings,
 	Track,
+	UnisonSettings,
 	WaveSource,
 	Wavetable,
 	WavetableFrame
@@ -1152,4 +1155,74 @@ export function duplicateAutomationLanesOf(trackId: Id): void {
 /** Track used by editor gestures, resolving the selection once per action. */
 export function selectedTrackOrNull(): Track | null {
 	return isMasterSelected() ? null : activeTrack();
+}
+
+/* ----------------------------------------------------- modulation envelopes */
+
+function mapModEnvelopes(
+	project: Project,
+	trackId: Id,
+	updater: (envelopes: ModEnvelope[]) => ModEnvelope[]
+): Project {
+	if (trackId === MASTER_TRACK_ID) {
+		const next = updater(project.master.modEnvelopes ?? []);
+		if (next === project.master.modEnvelopes) return project;
+		return { ...project, master: { ...project.master, modEnvelopes: next } };
+	}
+	return mapTracks(project, trackId, (track) => {
+		const next = updater(track.modEnvelopes ?? []);
+		if (next === track.modEnvelopes) return track;
+		return { ...track, modEnvelopes: next };
+	});
+}
+
+export function addModEnvelope(
+	destination: ParameterKey,
+	trigger: ModEnvelope['trigger'],
+	trackId = session.selectedTrackId
+): void {
+	mutate('Add envelope', (project) => {
+		const envelope = createModEnvelope(destination);
+		envelope.trigger = trigger;
+		return mapModEnvelopes(project, trackId, (envelopes) => [...envelopes, envelope]);
+	});
+}
+
+export function updateModEnvelope(
+	envelopeId: Id,
+	patch: Partial<ModEnvelope>,
+	trackId = session.selectedTrackId
+): void {
+	mutate(
+		'Edit envelope',
+		(project) =>
+			mapModEnvelopes(project, trackId, (envelopes) =>
+				envelopes.map((envelope) =>
+					envelope.id === envelopeId ? { ...envelope, ...patch } : envelope
+				)
+			),
+		{ coalesce: `env:${envelopeId}` }
+	);
+}
+
+export function removeModEnvelope(envelopeId: Id, trackId = session.selectedTrackId): void {
+	mutate('Remove envelope', (project) =>
+		mapModEnvelopes(project, trackId, (envelopes) =>
+			envelopes.filter((envelope) => envelope.id !== envelopeId)
+		)
+	);
+}
+
+/* ------------------------------------------------------------------ unison */
+
+export function updateTrackUnison(patch: Partial<UnisonSettings>, trackId: Id): void {
+	mutate(
+		'Unison settings',
+		(project) =>
+			mapTracks(project, trackId, (track) => ({
+				...track,
+				synth: { ...track.synth, unison: { ...track.synth.unison, ...patch } }
+			})),
+		{ coalesce: `unison:${trackId}` }
+	);
 }

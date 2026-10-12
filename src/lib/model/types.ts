@@ -242,6 +242,41 @@ export interface Wavetable {
 export type WaveSource =
 	'sine' | 'triangle' | 'saw' | 'square' | 'pulse' | 'white-noise' | 'wavetable';
 
+/** Every BiquadFilterNode flavour, so filters are not limited to the basics. */
+export type FilterType =
+	'lowpass' | 'highpass' | 'bandpass' | 'notch' | 'peaking' | 'lowshelf' | 'highshelf' | 'allpass';
+
+/**
+ * A beat-locked AD envelope that modulates one registry parameter.
+ * Trigger semantics are curve-first:
+ * - 'start' retriggers at the first point of every curve (voice start).
+ * - 'change' retriggers where the pitch stabilizes after a near-vertical
+ *   jump between two consecutive points.
+ */
+export interface ModEnvelope {
+	id: Id;
+	enabled: boolean;
+	/** parameter registry key, e.g. 'filter.cutoff' */
+	destination: ParameterKey;
+	trigger: 'start' | 'change';
+	/** attack time in beats (0 → peak) */
+	attackBeats: number;
+	/** decay time in beats (peak → 0) */
+	decayBeats: number;
+	/** -1 .. 1 modulation depth at the peak */
+	amount: number;
+}
+
+/** Stacked detuned copies of one voice. */
+export interface UnisonSettings {
+	/** 1 = single voice, 2..7 = stacked */
+	voices: number;
+	/** peak spread in cents; each voice sits within ±detuneCents */
+	detuneCents: number;
+	/** 0 = all voices in phase, 1 = start phases spread across the cycle */
+	phaseSpread: number;
+}
+
 export interface SynthSettings {
 	wave: WaveSource;
 	wavetableId?: Id;
@@ -249,9 +284,10 @@ export interface SynthSettings {
 	wavetablePosition: number;
 	pitchOffsetSemitones: number;
 	fineCents: number;
+	unison: UnisonSettings;
 	filter: {
 		enabled: boolean;
-		type: 'lowpass' | 'highpass' | 'bandpass';
+		type: FilterType;
 		cutoff: number;
 		resonance: number;
 	};
@@ -301,6 +337,7 @@ export interface Track {
 	lfos: Lfo[];
 	curves: Curve[];
 	automationLanes: AutomationLane[];
+	modEnvelopes: ModEnvelope[];
 }
 
 export interface MasterTrack {
@@ -308,6 +345,7 @@ export interface MasterTrack {
 	automationLanes: AutomationLane[];
 	mixer: MixerState;
 	synth: Pick<SynthSettings, 'filter' | 'drive' | 'delay' | 'reverb'>;
+	modEnvelopes: ModEnvelope[];
 }
 
 /* --------------------------------------------------------- editor / misc */

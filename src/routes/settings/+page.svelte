@@ -104,6 +104,7 @@
 		<a class="brand" href="/">Doodlesynth</a>
 		<nav>
 			<a href="/">Editor</a>
+			<a href="/projects">Projects</a>
 			<a href="/wavetables">Wavetables</a>
 			<a href="/tuning">Tuning</a>
 			<a class="is-current" href="/settings">Settings</a>

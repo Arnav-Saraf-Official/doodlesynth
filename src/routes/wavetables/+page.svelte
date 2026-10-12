@@ -15,6 +15,8 @@
 		WavetableFrame,
 		WavetableFrameSource
 	} from '#lib/model/types';
+	import { WAVETABLE_PRESETS } from '#lib/model/wavetablePresets';
+	import { onMount } from 'svelte';
 	import {
 		SAMPLE_LENGTHS,
 		analyzeFrameToHarmonics,
@@ -33,6 +35,7 @@
 		invertSamples
 	} from '#lib/model/wavetable';
 	import {
+		addWavetable,
 		addWavetableFrame,
 		createAndAddWavetable,
 		deleteWavetable,
@@ -43,13 +46,23 @@
 		updateWavetable,
 		updateWavetableFrame
 	} from '#lib/state/actions';
-	import { saveNow, session, setStatus } from '#lib/state/session.svelte';
+	import {
+		canRedo,
+		canUndo,
+		redo,
+		saveNow,
+		session,
+		setStatus,
+		undo
+	} from '#lib/state/session.svelte';
+	import { isEditableTarget } from '#lib/ui/shortcuts';
 	import { engine } from '#lib/audio/engine';
 	import IconButton from '#lib/ui/IconButton.svelte';
 	import NumberField from '#lib/ui/NumberField.svelte';
 	import SegmentedControl from '#lib/ui/SegmentedControl.svelte';
 	import Select from '#lib/ui/Select.svelte';
 	import Slider from '#lib/ui/Slider.svelte';
+	import FrameThumb from '#lib/components/wavetable/FrameThumb.svelte';
 	import HarmonicEditor from '#lib/components/wavetable/HarmonicEditor.svelte';
 	import ShapeEditor from '#lib/components/wavetable/ShapeEditor.svelte';
 
@@ -215,6 +228,41 @@
 		selectedTableId = id;
 		setStatus('Wavetable created');
 	}
+
+	/* ------------------------------------------------------------- presets */
+
+	function hasPreset(name: string): boolean {
+		return tables.some((entry) => entry.name === name);
+	}
+
+	function addPreset(preset: (typeof WAVETABLE_PRESETS)[number]): void {
+		const created = preset.create();
+		addWavetable(created);
+		selectedTableId = created.id;
+		selectedFrameId = null;
+		setStatus(`${preset.name} added to the library — editable like any table`);
+	}
+
+	/* ----------------------------------------------------------- keyboard */
+
+	// every wavetable edit is a project command, so the page-wide undo stack
+	// already covers frame edits, conversions and library changes
+	onMount(() => {
+		const onKeyDown = (event: KeyboardEvent) => {
+			if (isEditableTarget(event.target)) return;
+			const mod = event.ctrlKey || event.metaKey;
+			if (mod && event.key.toLowerCase() === 'z') {
+				event.preventDefault();
+				if (event.shiftKey) redo();
+				else undo();
+			} else if (mod && event.key.toLowerCase() === 'y') {
+				event.preventDefault();
+				redo();
+			}
+		};
+		window.addEventListener('keydown', onKeyDown);
+		return () => window.removeEventListener('keydown', onKeyDown);
+	});
 
 	function duplicateTable() {
 		if (!table) return;
@@ -395,11 +443,16 @@
 		</a>
 		<nav class="page-nav" aria-label="Sections">
 			<a href="/">Editor</a>
+			<a href="/projects">Projects</a>
 			<a href="/tuning">Tuning</a>
 			<a href="/settings">Settings</a>
 			<a href="/help">Help</a>
 		</nav>
 		<div class="spacer"></div>
+		<IconButton label="Undo (Ctrl/Cmd+Z)" disabled={!canUndo()} onclick={undo}>Undo</IconButton>
+		<IconButton label="Redo (Ctrl/Cmd+Shift+Z)" disabled={!canRedo()} onclick={redo}
+			>Redo</IconButton
+		>
 		<IconButton label="Save now" onclick={() => void saveNow()}>
 			<span class="num" data-state={session.saveState}>
 				{session.saveState === 'saved'
@@ -424,6 +477,32 @@
 				aria-label="Search wavetables"
 				bind:value={search}
 			/>
+
+			<div class="presets-head">
+				<span class="label">Presets</span>
+				<span class="presets-hint num">one click adds an editable copy</span>
+			</div>
+			<ul class="preset-list" aria-label="Wavetable presets">
+				{#each WAVETABLE_PRESETS as preset (preset.name)}
+					<li class="preset-row">
+						<span class="preset-text">
+							<span class="preset-name">{preset.name}</span>
+							<span class="preset-desc">{preset.description}</span>
+						</span>
+						<IconButton
+							size="sm"
+							label={hasPreset(preset.name)
+								? `${preset.name} is already in the library`
+								: `Add the ${preset.name} preset to the library`}
+							disabled={hasPreset(preset.name)}
+							onclick={() => addPreset(preset)}
+						>
+							{hasPreset(preset.name) ? 'Added' : 'Add'}
+						</IconButton>
+					</li>
+				{/each}
+			</ul>
+
 			<ul class="table-list">
 				{#each filtered as entry (entry.id)}
 					<li>
@@ -437,6 +516,12 @@
 								selectedFrameId = null;
 							}}
 						>
+							{#if entry.frames.length}
+								{@const mid = entry.frames[Math.floor(entry.frames.length / 2)]}
+								<span class="table-spark" aria-hidden="true">
+									<FrameThumb samples={mid.samples} width={44} height={16} />
+								</span>
+							{/if}
 							<span class="table-name">{entry.name}</span>
 							<span class="table-meta num">
 								{entry.frames.length} frames · {entry.sampleLength}
@@ -677,6 +762,10 @@
 								onpointerup={onFramePointerUp}
 								onpointercancel={onFramePointerUp}
 								onkeydown={(event) => {
+									if (event.key === 'Delete' || event.key === 'Backspace') {
+										event.preventDefault();
+										if (table && frames.length > 1) removeWavetableFrame(table.id, entry.id);
+									}
 									if (event.key === 'ArrowLeft')
 										setWavetableFramePosition(table.id, entry.id, entry.position - 0.01);
 									if (event.key === 'ArrowRight')
@@ -684,6 +773,9 @@
 								}}
 							>
 								<span class="frame-index num">{index}</span>
+								<span class="frame-thumb" aria-hidden="true">
+									<FrameThumb samples={entry.samples} width={24} height={16} />
+								</span>
 							</button>
 						{/each}
 					</div>
@@ -864,10 +956,72 @@
 		flex: 1;
 	}
 
+	.presets-head {
+		display: flex;
+		align-items: baseline;
+		justify-content: space-between;
+		gap: var(--sp-2);
+		padding-top: var(--sp-1);
+	}
+
+	.presets-hint {
+		font-size: 9px;
+		color: var(--color-fg-3);
+		white-space: nowrap;
+	}
+
+	.preset-list {
+		list-style: none;
+		margin: 0;
+		padding: 2px;
+		max-height: 196px;
+		overflow-y: auto;
+		border: 1px solid var(--color-line-0);
+		border-radius: var(--r-2);
+		background: var(--color-bg-0);
+	}
+
+	.preset-row {
+		display: flex;
+		align-items: center;
+		gap: var(--sp-2);
+		padding: var(--sp-1) 6px;
+		border-radius: var(--r-1);
+		transition: background-color 120ms var(--ease-out);
+	}
+
+	.preset-row:hover {
+		background: var(--color-bg-2);
+	}
+
+	.preset-text {
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+		flex: 1;
+		min-width: 0;
+	}
+
+	.preset-name {
+		font-size: 11.5px;
+		color: var(--color-fg-1);
+	}
+
+	.preset-desc {
+		font-size: 9.5px;
+		line-height: 1.35;
+		color: var(--color-fg-3);
+		display: -webkit-box;
+		line-clamp: 2;
+		-webkit-line-clamp: 2;
+		-webkit-box-orient: vertical;
+		overflow: hidden;
+	}
+
 	.table-row {
 		display: flex;
 		flex-wrap: wrap;
-		align-items: baseline;
+		align-items: center;
 		gap: var(--sp-2);
 		width: 100%;
 		text-align: left;
@@ -890,6 +1044,13 @@
 		background: var(--color-bg-3);
 		border-color: var(--color-line-1);
 		color: var(--color-fg-0);
+	}
+
+	.table-spark {
+		display: grid;
+		place-items: center;
+		flex: none;
+		opacity: 0.75;
 	}
 
 	.table-name {
@@ -990,13 +1151,13 @@
 
 	.strip {
 		position: relative;
-		height: 44px;
+		height: 48px;
 		margin: 0 var(--sp-4) var(--sp-3);
 	}
 
 	.strip-track {
 		position: absolute;
-		inset: 20px 0 auto 0;
+		inset: 24px 0 auto 0;
 		height: 3px;
 		border-radius: 2px;
 		background: var(--color-line-1);
@@ -1004,12 +1165,16 @@
 
 	.frame-handle {
 		position: absolute;
-		top: 6px;
+		top: 2px;
 		transform: translateX(-50%);
-		width: 20px;
-		height: 30px;
-		display: grid;
-		place-items: center;
+		width: 34px;
+		height: 42px;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		gap: 1px;
+		padding: 2px 0;
 		border: 1px solid var(--color-line-1);
 		border-radius: var(--r-2);
 		background: var(--color-bg-2);

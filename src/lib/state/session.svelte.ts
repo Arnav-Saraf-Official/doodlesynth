@@ -53,6 +53,8 @@ export interface Session {
 	selectedCurveIds: string[];
 	selectedPointIds: string[];
 	activeTool: Tool;
+	/** 'curve' is the continuous editor, 'midi' the piano-roll view over it */
+	editorMode: 'curve' | 'midi';
 	playhead: number;
 	playing: boolean;
 	loopEnabled: boolean;
@@ -85,6 +87,7 @@ export const session = $state<Session>({
 	selectedCurveIds: [],
 	selectedPointIds: [],
 	activeTool: 'draw',
+	editorMode: 'curve',
 	playhead: 0,
 	playing: false,
 	loopEnabled: false,
@@ -183,19 +186,26 @@ export function redo(): void {
 	}
 }
 
+/* The history itself is a plain object, so these read `session.revision` first:
+ * that is the reactive dependency that makes toolbar buttons re-evaluate
+ * after every edit instead of freezing at their first-render state. */
 export function canUndo(): boolean {
+	void session.revision;
 	return history.canUndo();
 }
 
 export function canRedo(): boolean {
+	void session.revision;
 	return history.canRedo();
 }
 
 export function undoLabel(): string | null {
+	void session.revision;
 	return history.nextUndoLabel();
 }
 
 export function redoLabel(): string | null {
+	void session.revision;
 	return history.nextRedoLabel();
 }
 
@@ -241,6 +251,7 @@ export function clearSelection(): void {
 
 export function setTool(tool: Tool): void {
 	session.activeTool = tool;
+	persistPreferences();
 	if (tool !== 'point') session.selectedPointIds = [];
 }
 
@@ -425,6 +436,7 @@ export function deleteProject(id: string) {
 
 const PREF_VIEWPORT = 'viewport';
 const PREF_TOOL = 'tool';
+const PREF_EDITOR_MODE = 'editorMode';
 
 export async function initSession(): Promise<void> {
 	if (session.initialized) return;
@@ -433,6 +445,7 @@ export async function initSession(): Promise<void> {
 	const storedViewport = readPreference<Partial<ViewportState> | null>(PREF_VIEWPORT, null);
 	if (storedViewport) session.viewport = { ...session.viewport, ...storedViewport };
 	session.activeTool = readPreference<Tool>(PREF_TOOL, 'draw');
+	session.editorMode = readPreference<'curve' | 'midi'>(PREF_EDITOR_MODE, 'curve');
 	session.loopEnabled = false;
 
 	const id = lastProjectId();
@@ -458,6 +471,7 @@ export function persistPreferences(): void {
 		projection: session.viewport.projection
 	});
 	writePreference(PREF_TOOL, session.activeTool);
+	writePreference(PREF_EDITOR_MODE, session.editorMode);
 }
 
 /* --------------------------------------------------------------- helpers */

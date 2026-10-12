@@ -25,11 +25,12 @@ import type {
 	Project,
 	SynthSettings,
 	Track,
+	UnisonSettings,
 	Wavetable,
 	WaveSource
 } from './types';
 
-export const PROJECT_VERSION = 2;
+export const PROJECT_VERSION = 3;
 
 export const TRACK_COLORS = [
 	'#4da3ff',
@@ -105,22 +106,33 @@ export function reconcilePointLinks(project: Project): Project {
  *
  * v1 could persist automation lanes collapsed by default, which left them as
  * unusable 20px strips on every reload. v2 opens those lanes back up so freshly
- * loaded projects always show full-height automation. Idempotent: a project at
- * the current version is returned untouched.
+ * loaded projects always show full-height automation. v3 adds modulation
+ * envelopes and unison settings, both of which default when missing.
+ * Idempotent: a project at the current version is returned untouched.
  */
 export function migrateProject(project: Project): Project {
 	if (project.version >= PROJECT_VERSION) return project;
 	const expand = (lanes: AutomationLane[]) =>
 		lanes.map((lane) => (lane.expanded === false ? { ...lane, expanded: true } : lane));
 	const masterLanes = expand(project.master.automationLanes);
-	const master = masterLanes.some((lane, index) => lane !== project.master.automationLanes[index])
-		? { ...project.master, automationLanes: masterLanes }
-		: project.master;
+	let master = project.master;
+	if (masterLanes.some((lane, index) => lane !== project.master.automationLanes[index])) {
+		master = { ...master, automationLanes: masterLanes };
+	}
+	if (!Array.isArray(master.modEnvelopes)) {
+		master = { ...master, modEnvelopes: [] };
+	}
 	const tracks = project.tracks.map((track) => {
 		const lanes = expand(track.automationLanes);
-		return lanes.some((lane, index) => lane !== track.automationLanes[index])
-			? { ...track, automationLanes: lanes }
-			: track;
+		let next = track;
+		if (lanes.some((lane, index) => lane !== track.automationLanes[index])) {
+			next = { ...next, automationLanes: lanes };
+		}
+		if (!Array.isArray(next.modEnvelopes)) next = { ...next, modEnvelopes: [] };
+		if (!next.synth.unison) {
+			next = { ...next, synth: { ...next.synth, unison: { ...DEFAULT_UNISON } } };
+		}
+		return next;
 	});
 	return { ...project, version: PROJECT_VERSION, master, tracks };
 }
@@ -141,12 +153,15 @@ export function createDefaultEnvelope(): Envelope {
 	return { attack: 0.01, decay: 0.04, sustain: 0.8, release: 0.1 };
 }
 
+export const DEFAULT_UNISON: UnisonSettings = { voices: 1, detuneCents: 12, phaseSpread: 0.5 };
+
 export function createDefaultSynth(): SynthSettings {
 	return {
 		wave: 'saw',
 		wavetablePosition: 0,
 		pitchOffsetSemitones: 0,
 		fineCents: 0,
+		unison: { ...DEFAULT_UNISON },
 		filter: { enabled: true, type: 'lowpass', cutoff: 12000, resonance: 1 },
 		drive: 0,
 		delay: { mix: 0, time: 0.25, feedback: 0.3 },
@@ -190,7 +205,8 @@ export function createTrack(name: string, colorIndex = 0, wave: WaveSource = 'sa
 		mixer: createDefaultMixer(),
 		lfos: [],
 		curves: [],
-		automationLanes: []
+		automationLanes: [],
+		modEnvelopes: []
 	};
 }
 
@@ -199,6 +215,7 @@ export function createMasterTrack(): MasterTrack {
 	return {
 		musicalState: [createMusicalStateKeyframe(0)],
 		automationLanes: [],
+		modEnvelopes: [],
 		mixer: createDefaultMixer(),
 		synth: {
 			filter: { ...synth.filter },

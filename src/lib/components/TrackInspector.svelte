@@ -8,9 +8,11 @@
 	 */
 	import {
 		addLfo,
+		addModEnvelope,
 		branchCurveAtPoint,
 		duplicateTrackById,
 		removeLfo,
+		removeModEnvelope,
 		removeTrack,
 		renameTrack,
 		retuneTrackToCurrentScale,
@@ -20,8 +22,10 @@
 		setTrackTuningFollow,
 		updateCurve,
 		updateLfo,
+		updateModEnvelope,
 		updateSynth,
-		updateTrackMixer
+		updateTrackMixer,
+		updateTrackUnison
 	} from '#lib/state/actions';
 	import {
 		activeTrack,
@@ -33,6 +37,7 @@
 	import { resolveMusicalState, resolveScale } from '#lib/model/musicalState';
 	import { JI_ANCHOR_LABELS, tuningLabel } from '#lib/model/tuning';
 	import { formatParameterValue, parametersForScope } from '#lib/model/parameters';
+	import { envelopeValueAt } from '#lib/model/modEnvelope';
 	import { TRACK_COLORS } from '#lib/model/project';
 	import {
 		centsFromNearestNote,
@@ -44,9 +49,11 @@
 	} from '#lib/model/pitch';
 	import type {
 		Curve,
+		FilterType,
 		Lfo,
 		LfoWaveform,
 		MasterTrack,
+		ModEnvelope,
 		PitchRepresentation,
 		WaveSource
 	} from '#lib/model/types';
@@ -58,6 +65,7 @@
 	import Select from '#lib/ui/Select.svelte';
 	import Slider from '#lib/ui/Slider.svelte';
 	import WaveSelector from './WaveSelector.svelte';
+	import EqPanel from './EqPanel.svelte';
 
 	const project = $derived(session.project);
 	const track = $derived(activeTrack());
@@ -94,6 +102,44 @@
 		}))
 	);
 
+	const masterDestinationOptions = $derived(
+		parametersForScope('master').map((parameter) => ({
+			value: parameter.key,
+			label: parameter.label
+		}))
+	);
+
+	const triggerOptions = [
+		{ value: 'start', label: 'Curve start' },
+		{ value: 'change', label: 'Pitch change' }
+	];
+
+	let newTrackEnvDestination = $state('filter.cutoff');
+	let newTrackEnvTrigger = $state<'start' | 'change'>('start');
+	let newMasterEnvDestination = $state('volume');
+	let newMasterEnvTrigger = $state<'start' | 'change'>('start');
+
+	function destinationLabel(key: string): string {
+		const all = [...destinationOptions, ...masterDestinationOptions];
+		return all.find((option) => option.value === key)?.label ?? key;
+	}
+
+	/** Tiny attack/decay shape so each envelope reads at a glance. */
+	function envelopeShape(envelope: ModEnvelope): string {
+		const width = 56;
+		const height = 16;
+		const total = Math.max(0.001, envelope.attackBeats + envelope.decayBeats);
+		const steps = 16;
+		const points: string[] = [];
+		for (let index = 0; index <= steps; index++) {
+			const level = envelopeValueAt(envelope, (index / steps) * total);
+			points.push(
+				`${((index / steps) * width).toFixed(1)},${(height - level * (height - 2)).toFixed(1)}`
+			);
+		}
+		return points.join(' ');
+	}
+
 	const lfoWaveOptions = [
 		{ value: 'sine', label: 'Sine' },
 		{ value: 'triangle', label: 'Triangle' },
@@ -114,7 +160,12 @@
 	const filterTypeOptions = [
 		{ value: 'lowpass', label: 'Low pass' },
 		{ value: 'highpass', label: 'High pass' },
-		{ value: 'bandpass', label: 'Band pass' }
+		{ value: 'bandpass', label: 'Band pass' },
+		{ value: 'notch', label: 'Notch' },
+		{ value: 'peaking', label: 'Peaking' },
+		{ value: 'lowshelf', label: 'Low shelf' },
+		{ value: 'highshelf', label: 'High shelf' },
+		{ value: 'allpass', label: 'All pass' }
 	];
 
 	function cycleColor() {
@@ -163,6 +214,85 @@
 </script>
 
 <aside class="inspector" aria-label={isMaster ? 'Master inspector' : 'Track inspector'}>
+	{#snippet envelopeRow(envelope: ModEnvelope, scope: string)}
+		<div class="env">
+			<div class="env-head">
+				<IconButton
+					size="sm"
+					active={envelope.enabled}
+					label={envelope.enabled ? 'Disable envelope' : 'Enable envelope'}
+					onclick={() => updateModEnvelope(envelope.id, { enabled: !envelope.enabled }, scope)}
+				>
+					{envelope.enabled ? 'On' : 'Off'}
+				</IconButton>
+				<span class="env-name">{destinationLabel(envelope.destination)}</span>
+				<span class="env-trigger num"
+					>{envelope.trigger === 'start' ? 'on start' : 'on change'}</span
+				>
+				<svg class="env-shape" viewBox="0 0 56 16" aria-hidden="true">
+					<polyline
+						points={envelopeShape(envelope)}
+						fill="none"
+						stroke="currentColor"
+						stroke-width="1.4"
+					/>
+				</svg>
+				<IconButton
+					size="sm"
+					variant="danger"
+					label={`Remove ${destinationLabel(envelope.destination)} envelope`}
+					onclick={() => removeModEnvelope(envelope.id, scope)}
+				>
+					<svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
+						<path d="M3 3l6 6M9 3l-6 6" fill="none" stroke="currentColor" />
+					</svg>
+				</IconButton>
+			</div>
+			<div class="grid-2">
+				<Select
+					label="Trigger"
+					value={envelope.trigger}
+					options={triggerOptions}
+					ariaLabel="Envelope trigger"
+					onchange={(value) =>
+						updateModEnvelope(envelope.id, { trigger: value as ModEnvelope['trigger'] }, scope)}
+				/>
+				<NumberField
+					label="Attack"
+					value={envelope.attackBeats}
+					min={0}
+					max={16}
+					step={0.05}
+					decimals={2}
+					unit="beats"
+					onchange={(value) =>
+						updateModEnvelope(envelope.id, { attackBeats: Math.max(0, value) }, scope)}
+				/>
+				<NumberField
+					label="Decay"
+					value={envelope.decayBeats}
+					min={0}
+					max={64}
+					step={0.05}
+					decimals={2}
+					unit="beats"
+					onchange={(value) =>
+						updateModEnvelope(envelope.id, { decayBeats: Math.max(0, value) }, scope)}
+				/>
+			</div>
+			<Field label="Amount">
+				<Slider
+					value={envelope.amount}
+					min={-1}
+					max={1}
+					step={0.01}
+					ariaLabel="Envelope amount"
+					onchange={(value) => updateModEnvelope(envelope.id, { amount: value }, scope)}
+				/>
+				<span class="value num">{Math.round(envelope.amount * 100)}%</span>
+			</Field>
+		</div>
+	{/snippet}
 	<header class="inspector-header">
 		{#if track}
 			<button
@@ -438,9 +568,48 @@
 							: 'Table missing'}
 					</p>
 				{/if}
-				<p class="note dim">
-					Live playback arrives in a later phase; drawing and shaping are fully functional.
-				</p>
+				<Field label="Unison" stacked>
+					<div class="stack">
+						<NumberField
+							label="Voices"
+							value={track.synth.unison.voices}
+							min={1}
+							max={7}
+							step={1}
+							decimals={0}
+							onchange={(value) =>
+								updateTrackUnison(
+									{ voices: Math.max(1, Math.min(7, Math.round(value))) },
+									track.id
+								)}
+						/>
+						<NumberField
+							label="Detune"
+							value={track.synth.unison.detuneCents}
+							min={0}
+							max={100}
+							step={1}
+							decimals={0}
+							unit="cents"
+							onchange={(value) =>
+								updateTrackUnison({ detuneCents: Math.max(0, Math.min(100, value)) }, track.id)}
+						/>
+						<Field label="Phase">
+							<Slider
+								value={track.synth.unison.phaseSpread}
+								min={0}
+								max={1}
+								step={0.01}
+								ariaLabel="Unison phase spread"
+								onchange={(value) => updateTrackUnison({ phaseSpread: value }, track.id)}
+							/>
+							<span class="value num">{Math.round(track.synth.unison.phaseSpread * 100)}%</span>
+						</Field>
+					</div>
+					<p class="note dim">
+						Voices stack across ±detune cents; phase spread offsets each voice's start phase.
+					</p>
+				</Field>
 			</Panel>
 
 			<Panel title="Pitch">
@@ -589,6 +758,11 @@
 			</Panel>
 
 			<Panel title="Master FX">
+				<EqPanel
+					filter={master.synth.filter}
+					ariaLabel="Master filter response"
+					onchange={(patch) => patchMasterSynth({ filter: { ...master.synth.filter, ...patch } })}
+				/>
 				<Field label="Filter" stacked>
 					<div class="grid-2">
 						<Select
@@ -599,7 +773,7 @@
 								patchMasterSynth({
 									filter: {
 										...master.synth.filter,
-										type: value as 'lowpass' | 'highpass' | 'bandpass'
+										type: value as FilterType
 									}
 								})}
 						/>
@@ -683,6 +857,39 @@
 						>{formatParameterValue('fx.reverb.mix', master.synth.reverb.mix)}</span
 					>
 				</Field>
+				<Field label="Envelopes" stacked>
+					{#if master.modEnvelopes.length === 0}
+						<p class="note dim">
+							No envelopes yet. Each one sweeps its destination from every trigger.
+						</p>
+					{/if}
+					{#each master.modEnvelopes as envelope (envelope.id)}
+						{@render envelopeRow(envelope, 'master')}
+					{/each}
+					<div class="env-add">
+						<Select
+							ariaLabel="New master envelope destination"
+							value={newMasterEnvDestination}
+							options={masterDestinationOptions}
+							width="140px"
+							onchange={(value) => (newMasterEnvDestination = value)}
+						/>
+						<Select
+							ariaLabel="New master envelope trigger"
+							value={newMasterEnvTrigger}
+							options={triggerOptions}
+							width="130px"
+							onchange={(value) => (newMasterEnvTrigger = value as 'start' | 'change')}
+						/>
+						<IconButton
+							size="sm"
+							label="Add master envelope"
+							onclick={() => addModEnvelope(newMasterEnvDestination, newMasterEnvTrigger, 'master')}
+						>
+							Add
+						</IconButton>
+					</div>
+				</Field>
 			</Panel>
 
 			<Panel title="Musical state">
@@ -735,6 +942,13 @@
 
 		{#if track}
 			<Panel title="Filter">
+				<EqPanel
+					filter={track.synth.filter}
+					accent={track.color}
+					ariaLabel="Track filter response"
+					onchange={(patch) =>
+						updateSynth(track.id, { filter: { ...track.synth.filter, ...patch } })}
+				/>
 				<Field label="Enabled">
 					<SegmentedControl
 						value={track.synth.filter.enabled ? 'on' : 'off'}
@@ -756,7 +970,7 @@
 							updateSynth(track.id, {
 								filter: {
 									...track.synth.filter,
-									type: value as 'lowpass' | 'highpass' | 'bandpass'
+									type: value as FilterType
 								}
 							})}
 					/>
@@ -884,6 +1098,38 @@
 				{/each}
 				<div class="row-end">
 					<IconButton label="Add LFO" onclick={() => addLfo(track.id)}>Add LFO</IconButton>
+				</div>
+				<p class="env-section-title">Envelopes</p>
+				{#if track.modEnvelopes.length === 0}
+					<p class="note dim">
+						No envelopes. Each one sweeps its destination from every curve start or pitch step.
+					</p>
+				{/if}
+				{#each track.modEnvelopes as envelope (envelope.id)}
+					{@render envelopeRow(envelope, track.id)}
+				{/each}
+				<div class="env-add">
+					<Select
+						ariaLabel="New envelope destination"
+						value={newTrackEnvDestination}
+						options={destinationOptions}
+						width="140px"
+						onchange={(value) => (newTrackEnvDestination = value)}
+					/>
+					<Select
+						ariaLabel="New envelope trigger"
+						value={newTrackEnvTrigger}
+						options={triggerOptions}
+						width="130px"
+						onchange={(value) => (newTrackEnvTrigger = value as 'start' | 'change')}
+					/>
+					<IconButton
+						size="sm"
+						label="Add envelope"
+						onclick={() => addModEnvelope(newTrackEnvDestination, newTrackEnvTrigger, track.id)}
+					>
+						Add
+					</IconButton>
 				</div>
 			</Panel>
 
@@ -1209,6 +1455,72 @@
 		display: flex;
 		align-items: center;
 		gap: var(--sp-2);
+	}
+
+	.stack {
+		display: flex;
+		flex-direction: column;
+		gap: var(--sp-2);
+	}
+
+	.stack :global(.field) {
+		width: 100%;
+	}
+
+	.env {
+		display: flex;
+		flex-direction: column;
+		gap: var(--sp-2);
+		margin: var(--sp-2) 0;
+		padding: var(--sp-2);
+		border: 1px solid var(--color-line-0);
+		border-radius: var(--r-2);
+		background: var(--color-bg-2);
+	}
+
+	.env-head {
+		display: flex;
+		align-items: center;
+		gap: var(--sp-2);
+	}
+
+	.env-name {
+		flex: 1;
+		min-width: 0;
+		font-size: 11.5px;
+		color: var(--color-fg-0);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.env-trigger {
+		font-size: 9.5px;
+		color: var(--color-fg-3);
+		white-space: nowrap;
+	}
+
+	.env-shape {
+		width: 56px;
+		height: 16px;
+		flex: none;
+		color: var(--color-accent);
+	}
+
+	.env-add {
+		display: flex;
+		align-items: flex-end;
+		gap: var(--sp-2);
+		margin-top: var(--sp-2);
+	}
+
+	.env-section-title {
+		margin: var(--sp-4) 0 var(--sp-1);
+		font-size: 10.5px;
+		font-weight: 600;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--color-fg-3);
 	}
 
 	.lfo-name {

@@ -48,6 +48,7 @@
 			<a class="brand" href="/">Doodlesynth</a>
 			<nav aria-label="Primary">
 				<a href="/">Editor</a>
+				<a href="/projects">Projects</a>
 				<a href="/wavetables">Wavetables</a>
 				<a href="/tuning">Tuning</a>
 				<a href="/settings">Settings</a>
@@ -131,8 +132,10 @@
 						<dt>Local only</dt>
 						<dd>
 							There is no account and no server. Projects autosave into this browser's storage; the <a
-								href="/settings">Settings</a
-							> page lists saved projects and can save or open them explicitly.
+								href="/projects">Projects</a
+							>
+							page lists them as a dashboard where you can create, open or delete one, and the
+							<a href="/settings">Settings</a> page can save or open them explicitly.
 						</dd>
 					</div>
 				</dl>

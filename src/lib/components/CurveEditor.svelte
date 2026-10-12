@@ -139,6 +139,41 @@
 	let measureReadout = $state<string | null>(null);
 	let menu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
 	let dragActive = $state(false);
+	/** a point dropped on another line asks before it becomes a branch */
+	let pendingLink = $state<{
+		trackId: string;
+		sourceCurveId: string;
+		sourceName: string;
+		targetCurveId: string;
+		targetName: string;
+		pointId: string;
+		time: number;
+		frequency: number;
+	} | null>(null);
+	let linkDialog = $state<HTMLDivElement | null>(null);
+
+	$effect(() => {
+		if (pendingLink) linkDialog?.focus();
+	});
+
+	function confirmLink() {
+		const pending = pendingLink;
+		pendingLink = null;
+		if (!pending) return;
+		attachPointToCurve(pending.trackId, pending.targetCurveId, {
+			curveId: pending.sourceCurveId,
+			pointId: pending.pointId,
+			time: pending.time,
+			frequency: pending.frequency
+		});
+		setStatus('Linked the two lines at this point');
+	}
+
+	function cancelLink() {
+		if (!pendingLink) return;
+		pendingLink = null;
+		setStatus('Link cancelled — the point stays where you dropped it');
+	}
 
 	interface MenuItem {
 		label: string;
@@ -1036,18 +1071,22 @@
 				if (points && drag.curveId && current) {
 					setCurvePoints(current.id, drag.curveId, points, 'Move point');
 				}
-				// dropping a point onto another line branches that line here and links
-				// the two, so the junction follows this point from now on
+				// dropping a point onto another line offers to branch that line here
+				// and link the two; the link itself waits for confirmation
 				if (current && drag.curveId && drag.pointId && movedPoint) {
 					const target = findOtherCurveHit(x, y, drag.curveId);
 					if (target) {
-						attachPointToCurve(current.id, target.curve.id, {
-							curveId: drag.curveId,
+						pendingLink = {
+							trackId: current.id,
+							sourceCurveId: drag.curveId,
+							sourceName:
+								current.curves.find((entry) => entry.id === drag.curveId)?.name ?? 'curve',
+							targetCurveId: target.curve.id,
+							targetName: target.curve.name,
 							pointId: drag.pointId,
 							time: movedPoint.time,
 							frequency: movedPoint.frequency
-						});
-						setStatus('Linked the two lines at this point');
+						};
 					}
 				}
 				break;
@@ -1444,6 +1483,35 @@
 		{/if}
 	</div>
 
+	{#if pendingLink}
+		<div class="link-backdrop" role="presentation">
+			<div
+				class="link-dialog"
+				role="alertdialog"
+				tabindex="-1"
+				aria-modal="true"
+				aria-label="Link these two lines?"
+				bind:this={linkDialog}
+				onkeydown={(event) => {
+					if (event.key === 'Escape') cancelLink();
+					if (event.key === 'Enter') confirmLink();
+				}}
+			>
+				<p class="link-title">Link these two lines?</p>
+				<p class="link-body">
+					<span class="link-name">{pendingLink.sourceName}</span> will stay joined to
+					<span class="link-name">{pendingLink.targetName}</span> at
+					{formatHz(pendingLink.frequency)} · beat {pendingLink.time.toFixed(2)}. Moving the point
+					moves the junction from now on.
+				</p>
+				<div class="link-actions">
+					<button type="button" class="link-cancel" onclick={cancelLink}>Cancel</button>
+					<button type="button" class="link-confirm" onclick={confirmLink}>Link</button>
+				</div>
+			</div>
+		</div>
+	{/if}
+
 	<div class="context-bar">
 		<div class="context-left">
 			<SegmentedControl
@@ -1535,6 +1603,7 @@
 
 <style>
 	.editor {
+		position: relative;
 		display: grid;
 		grid-template-columns: 62px 1fr;
 		grid-template-rows: 26px 1fr 28px;
@@ -1687,5 +1756,85 @@
 		width: 1px;
 		height: 16px;
 		background: var(--color-line-1);
+	}
+	.link-backdrop {
+		position: absolute;
+		inset: 0;
+		z-index: 30;
+		display: grid;
+		place-items: center;
+		background: rgb(0 0 0 / 0.35);
+	}
+
+	.link-dialog {
+		display: flex;
+		flex-direction: column;
+		gap: var(--sp-3);
+		width: min(380px, 90%);
+		padding: var(--sp-4);
+		border: 1px solid var(--color-line-1);
+		border-radius: var(--r-3);
+		background: var(--color-bg-1);
+		box-shadow: 0 12px 32px rgb(0 0 0 / 0.45);
+		outline: none;
+	}
+
+	.link-title {
+		margin: 0;
+		font-size: 13px;
+		font-weight: 600;
+		color: var(--color-fg-0);
+	}
+
+	.link-body {
+		margin: 0;
+		font-size: 11.5px;
+		line-height: 1.55;
+		color: var(--color-fg-1);
+	}
+
+	.link-name {
+		color: var(--color-fg-0);
+		font-weight: 600;
+	}
+
+	.link-actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: var(--sp-2);
+	}
+
+	.link-actions button {
+		height: 26px;
+		padding: 0 var(--sp-3);
+		border: 1px solid var(--color-line-1);
+		border-radius: var(--r-2);
+		font-size: 11px;
+		color: var(--color-fg-1);
+		background: var(--color-bg-2);
+		cursor: pointer;
+		transition:
+			background-color 120ms var(--ease-out),
+			color 120ms var(--ease-out),
+			transform 120ms var(--ease-out);
+	}
+
+	.link-actions button:active {
+		transform: scale(0.97);
+	}
+
+	.link-actions .link-cancel:hover {
+		background: var(--color-bg-3);
+		color: var(--color-fg-0);
+	}
+
+	.link-actions .link-confirm {
+		background: color-mix(in oklab, var(--color-accent) 26%, var(--color-bg-2));
+		border-color: color-mix(in oklab, var(--color-accent) 55%, var(--color-line-1));
+		color: var(--color-fg-0);
+	}
+
+	.link-actions .link-confirm:hover {
+		background: color-mix(in oklab, var(--color-accent) 38%, var(--color-bg-2));
 	}
 </style>
