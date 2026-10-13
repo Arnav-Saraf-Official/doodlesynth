@@ -2,10 +2,17 @@
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import IconButton from '#lib/ui/IconButton.svelte';
-	import { createDefaultProject } from '#lib/model/project';
+	import {
+		createDefaultProject,
+		deserializeProject,
+		PROJECT_VERSION,
+		serializeProject
+	} from '#lib/model/project';
+	import { uid } from '#lib/model/ids';
 	import type { ProjectSummary } from '#lib/model/types';
 	import {
 		deleteProject,
+		getProject,
 		initSession,
 		listProjects,
 		loadProject,
@@ -18,6 +25,7 @@
 	let ready = $state(false);
 	let busy = $state(false);
 	let message = $state<string | null>(null);
+	let importInput: HTMLInputElement;
 
 	const currentId = $derived(session.project.id);
 
@@ -56,6 +64,94 @@
 			if (!names.has(candidate)) return candidate;
 		}
 		return `Untitled ${Date.now()}`;
+	}
+
+	function handleImportClick() {
+		importInput.click();
+	}
+
+	function isImportableProject(value: unknown): boolean {
+		if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+		const candidate = value as Record<string, unknown>;
+		return (
+			typeof candidate.id === 'string' &&
+			typeof candidate.name === 'string' &&
+			typeof candidate.version === 'number' &&
+			candidate.version >= 1 &&
+			candidate.version <= PROJECT_VERSION &&
+			typeof candidate.tempo === 'number' &&
+			Array.isArray(candidate.tracks) &&
+			(candidate.wavetables === undefined || Array.isArray(candidate.wavetables))
+		);
+	}
+
+	async function handleImportFile(event: Event) {
+		const input = event.currentTarget as HTMLInputElement;
+		const file = input.files?.[0];
+		input.value = '';
+		if (!file) return;
+
+		busy = true;
+		message = null;
+		try {
+			const text = await file.text();
+			const document: unknown = JSON.parse(text);
+			if (!isImportableProject(document)) {
+				throw new Error('This is not a supported Doodlesynth project file');
+			}
+			const imported = deserializeProject(text);
+			replaceProject(
+				{ ...imported, id: uid('proj'), updatedAt: Date.now() },
+				{ resetHistory: true }
+			);
+			session.viewport = {
+				...session.viewport,
+				startBeat: 0,
+				minFrequencyHz: imported.editorSettings.minFrequencyHz,
+				maxFrequencyHz: imported.editorSettings.maxFrequencyHz,
+				pitchMap: imported.editorSettings.pitchMap,
+				projection: imported.editorSettings.frequencyProjection
+			};
+			await saveNow();
+			if (session.saveState === 'error')
+				throw new Error(session.saveError ?? 'Could not save project');
+			await refresh();
+
+			message = `Imported “${imported.name}”`;
+		} catch (error) {
+			message = error instanceof Error ? error.message : 'Could not import project';
+		} finally {
+			busy = false;
+		}
+	}
+
+	async function handleExport(entry: ProjectSummary) {
+		busy = true;
+		message = null;
+		try {
+			const project = entry.id === currentId ? session.project : await getProject(entry.id);
+			if (!project) throw new Error('Could not load that project');
+
+			const blob = new Blob([serializeProject(project)], { type: 'application/json' });
+			const url = URL.createObjectURL(blob);
+			const link = document.createElement('a');
+			const filename =
+				entry.name
+					.trim()
+					.replace(/[^a-z0-9_-]+/gi, '-')
+					.replace(/^-|-$/g, '') || 'project';
+			link.href = url;
+			link.download = `${filename}.doodlesynth.json`;
+			document.body.append(link);
+			link.click();
+			link.remove();
+			URL.revokeObjectURL(url);
+			message = `Exported “${entry.name}”`;
+		} catch (error) {
+			message = error instanceof Error ? error.message : 'Could not export project';
+		} finally {
+			busy = false;
+		}
 	}
 
 	async function handleNew() {
@@ -105,7 +201,7 @@
 			<nav aria-label="Primary">
 				<a href="/">Editor</a>
 				<a class="is-current" href="/projects" aria-current="page">Projects</a>
-				<a href="/wavetables">Wavetables</a>
+				<a href="/sounds">Sounds</a>
 				<a href="/tuning">Tuning</a>
 				<a href="/settings">Settings</a>
 				<a href="/help">Help</a>
@@ -124,6 +220,18 @@
 					</p>
 				</div>
 				<div class="hero-action">
+					<input
+						bind:this={importInput}
+						class="file-input"
+						type="file"
+						accept=".json,application/json"
+						aria-label="Choose a project file to import"
+						disabled={busy}
+						onchange={handleImportFile}
+					/>
+					<IconButton label="Import a project" disabled={busy} onclick={handleImportClick}
+						>Import project</IconButton
+					>
 					<IconButton
 						label="Start a new project"
 						variant="solid"
@@ -180,6 +288,14 @@
 									onclick={() => void handleOpen(entry.id)}
 								>
 									Open
+								</IconButton>
+								<IconButton
+									label={`Export ${entry.name}`}
+									size="sm"
+									disabled={busy}
+									onclick={() => void handleExport(entry)}
+								>
+									Export
 								</IconButton>
 								<IconButton
 									label={`Delete ${entry.name}`}
@@ -319,6 +435,10 @@
 		font-size: 13px;
 		line-height: 1.55;
 		color: var(--color-fg-1);
+	}
+
+	.file-input {
+		display: none;
 	}
 
 	.hero-action {

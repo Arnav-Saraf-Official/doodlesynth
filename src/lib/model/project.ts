@@ -5,6 +5,7 @@
  * read it through the state layer, and mutation happens through commands.
  */
 
+import { ensureSoundProfiles } from './soundProfile';
 import { duplicateLanes, createAutomationLane } from './automation';
 import { createPoint } from './curve';
 import { uid } from './ids';
@@ -30,7 +31,7 @@ import type {
 	WaveSource
 } from './types';
 
-export const PROJECT_VERSION = 3;
+export const PROJECT_VERSION = 4;
 
 export const TRACK_COLORS = [
 	'#4da3ff',
@@ -111,9 +112,11 @@ export function reconcilePointLinks(project: Project): Project {
  * Idempotent: a project at the current version is returned untouched.
  */
 export function migrateProject(project: Project): Project {
-	if (project.version >= PROJECT_VERSION) return project;
+	if (project.version >= PROJECT_VERSION) return ensureSoundProfiles(project);
 	const expand = (lanes: AutomationLane[]) =>
-		lanes.map((lane) => (lane.expanded === false ? { ...lane, expanded: true } : lane));
+		project.version < 2
+			? lanes.map((lane) => (lane.expanded === false ? { ...lane, expanded: true } : lane))
+			: lanes;
 	const masterLanes = expand(project.master.automationLanes);
 	let master = project.master;
 	if (masterLanes.some((lane, index) => lane !== project.master.automationLanes[index])) {
@@ -134,7 +137,7 @@ export function migrateProject(project: Project): Project {
 		}
 		return next;
 	});
-	return { ...project, version: PROJECT_VERSION, master, tracks };
+	return ensureSoundProfiles({ ...project, version: PROJECT_VERSION, master, tracks });
 }
 
 export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
@@ -153,7 +156,7 @@ export function createDefaultEnvelope(): Envelope {
 	return { attack: 0.01, decay: 0.04, sustain: 0.8, release: 0.1 };
 }
 
-export const DEFAULT_UNISON: UnisonSettings = { voices: 1, detuneCents: 12, phaseSpread: 0.5 };
+export const DEFAULT_UNISON: UnisonSettings = { voices: 1, detuneCents: 12, phaseSpread: 0 };
 
 export function createDefaultSynth(): SynthSettings {
 	return {
@@ -239,6 +242,7 @@ export function createDefaultProject(name = 'Untitled', withTrack = false): Proj
 		tracks: [],
 		master: createMasterTrack(),
 		wavetables: createBuiltInWavetables(),
+		soundProfiles: [],
 		scales: createBuiltInScales(),
 		markers: [],
 		loop: { enabled: false, start: 0, end: 16 },
@@ -246,7 +250,7 @@ export function createDefaultProject(name = 'Untitled', withTrack = false): Proj
 		updatedAt: now
 	};
 	if (withTrack) project.tracks.push(createTrack('Lead', 0));
-	return project;
+	return ensureSoundProfiles(project);
 }
 
 export function nextTrackColor(project: Project): string {
@@ -408,7 +412,7 @@ export function deserializeProject(text: string): Project {
 			...track
 		}))
 	};
-	return project;
+	return migrateProject(project);
 }
 
 /** Fresh default tuning, cloned so callers never share a reference. */

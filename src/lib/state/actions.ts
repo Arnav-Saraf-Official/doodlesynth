@@ -47,6 +47,7 @@ import {
 	createWavetable,
 	refreshFrameSamples
 } from '#lib/model/wavetable';
+import { createSoundProfile, oscillatorFromSynth } from '#lib/model/soundProfile';
 import { createModEnvelope } from '#lib/model/modEnvelope';
 import type {
 	AutomationLane,
@@ -63,6 +64,7 @@ import type {
 	Project,
 	ScaleDefinition,
 	SynthSettings,
+	SoundProfile,
 	Track,
 	UnisonSettings,
 	WaveSource,
@@ -94,7 +96,27 @@ function mapTracks(project: Project, trackId: Id, updater: (track: Track) => Tra
 		if (next !== track) changed = true;
 		return next;
 	});
-	return changed ? { ...project, tracks } : project;
+	if (!changed) return project;
+	const edited = tracks.find((track) => track.id === trackId);
+	const previous = project.tracks.find((track) => track.id === trackId);
+	const soundProfiles =
+		edited?.soundProfileId &&
+		previous &&
+		(edited.synth !== previous.synth ||
+			edited.lfos !== previous.lfos ||
+			edited.modEnvelopes !== previous.modEnvelopes)
+			? project.soundProfiles.map((sound) =>
+					sound.id === edited.soundProfileId
+						? {
+								...sound,
+								synth: edited.synth,
+								lfos: edited.lfos,
+								modEnvelopes: edited.modEnvelopes
+							}
+						: sound
+				)
+			: project.soundProfiles;
+	return { ...project, tracks, soundProfiles };
 }
 
 function mapCurves(project: Project, trackId: Id, updater: (curve: Curve) => Curve): Project {
@@ -197,7 +219,38 @@ export function updateSynth(trackId: Id, patch: Partial<SynthSettings>): void {
 	mutate(
 		'Synth setting',
 		(project) =>
-			mapTracks(project, trackId, (track) => ({ ...track, synth: { ...track.synth, ...patch } })),
+			mapTracks(project, trackId, (track) => {
+				const synth = { ...track.synth, ...patch };
+				if (
+					synth.oscillators &&
+					(patch.wave !== undefined ||
+						'wavetableId' in patch ||
+						patch.wavetablePosition !== undefined ||
+						patch.unison)
+				) {
+					const primary = oscillatorFromSynth(synth);
+					synth.oscillators = synth.oscillators.map((osc, index) =>
+						index === 0
+							? {
+									...osc,
+									wave: primary.wave,
+									wavetableId: primary.wavetableId,
+									wavetablePosition: primary.wavetablePosition,
+									unison: primary.unison
+								}
+							: osc
+					);
+				}
+				if (patch.delay || patch.reverb)
+					synth.effects = synth.effects?.map((effect) =>
+						effect.kind === 'delay' && patch.delay
+							? { ...effect, mix: patch.delay.mix, enabled: patch.delay.mix > 0 }
+							: effect.kind === 'reverb' && patch.reverb
+								? { ...effect, mix: patch.reverb.mix, enabled: patch.reverb.mix > 0 }
+								: effect
+					);
+				return { ...track, synth };
+			}),
 		{ coalesce: `synth:${trackId}` }
 	);
 }
@@ -291,6 +344,51 @@ export function removeLfo(trackId: Id, lfoId: Id): void {
 			lfos: track.lfos.filter((lfo) => lfo.id !== lfoId)
 		}))
 	);
+}
+
+/* --------------------------------------------------------- sound profiles */
+
+export function updateSoundProfile(id: Id, patch: Partial<SoundProfile>): void {
+	mutate(
+		'Edit sound',
+		(project) => ({
+			...project,
+			soundProfiles: project.soundProfiles.map((sound) =>
+				sound.id === id ? { ...sound, ...patch, id } : sound
+			)
+		}),
+		{ coalesce: `sound:${id}` }
+	);
+}
+
+export function addSoundProfile(name = 'Init sound', source?: SoundProfile): string {
+	const sound = source
+		? { ...JSON.parse(JSON.stringify(source)), id: uid('sound'), name }
+		: createSoundProfile(name, createTrack('Sound').synth);
+	mutate('Create sound', (project) => ({
+		...project,
+		soundProfiles: [...project.soundProfiles, sound]
+	}));
+	return sound.id;
+}
+
+export function selectTrackSound(trackId: Id, soundProfileId: Id): void {
+	if (!session.project.soundProfiles.some((sound) => sound.id === soundProfileId)) return;
+	mutate('Choose sound', (project) =>
+		mapTracks(project, trackId, (track) => ({ ...track, soundProfileId }))
+	);
+}
+
+export function deleteSoundProfile(id: Id): boolean {
+	if (session.project.tracks.some((track) => track.soundProfileId === id)) {
+		setStatus('This sound is used by a track. Choose another sound first.');
+		return false;
+	}
+	mutate('Delete sound', (project) => ({
+		...project,
+		soundProfiles: project.soundProfiles.filter((sound) => sound.id !== id)
+	}));
+	return true;
 }
 
 /* ----------------------------------------------------------------- curves */
@@ -1216,13 +1314,6 @@ export function removeModEnvelope(envelopeId: Id, trackId = session.selectedTrac
 /* ------------------------------------------------------------------ unison */
 
 export function updateTrackUnison(patch: Partial<UnisonSettings>, trackId: Id): void {
-	mutate(
-		'Unison settings',
-		(project) =>
-			mapTracks(project, trackId, (track) => ({
-				...track,
-				synth: { ...track.synth, unison: { ...track.synth.unison, ...patch } }
-			})),
-		{ coalesce: `unison:${trackId}` }
-	);
+	const track = session.project.tracks.find((entry) => entry.id === trackId);
+	if (track) updateSynth(trackId, { unison: { ...track.synth.unison, ...patch } });
 }

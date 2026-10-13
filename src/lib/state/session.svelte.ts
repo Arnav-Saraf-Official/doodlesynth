@@ -9,6 +9,7 @@
  * regardless of project size.
  */
 
+import { ensureSoundProfiles } from '#lib/model/soundProfile';
 import { engine } from '#lib/audio/engine';
 import { HistoryManager } from '#lib/history/history';
 import { beatsToSeconds } from '#lib/model/pitch';
@@ -113,7 +114,7 @@ const storage = createProjectStorage();
 
 function applyProject(next: Project): void {
 	// single choke point: keep branch junctions glued to their source point
-	const reconciled = reconcilePointLinks(next);
+	const reconciled = reconcilePointLinks(ensureSoundProfiles(next));
 	session.project = { ...reconciled, updatedAt: Date.now() };
 	session.revision += 1;
 	// the audio engine schedules from the live snapshot on its next tick
@@ -426,6 +427,10 @@ export async function loadProject(id: string): Promise<boolean> {
 
 export function listProjects() {
 	return storage.list();
+}
+
+export function getProject(id: string) {
+	return storage.load(id);
 }
 
 export function deleteProject(id: string) {

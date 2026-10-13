@@ -18,6 +18,7 @@
 		retuneTrackToCurrentScale,
 		setCurvePoints,
 		setTrackColor,
+		selectTrackSound,
 		setTrackPitchRepresentation,
 		setTrackTuningFollow,
 		updateCurve,
@@ -54,8 +55,7 @@
 		LfoWaveform,
 		MasterTrack,
 		ModEnvelope,
-		PitchRepresentation,
-		WaveSource
+		PitchRepresentation
 	} from '#lib/model/types';
 	import IconButton from '#lib/ui/IconButton.svelte';
 	import Field from '#lib/ui/Field.svelte';
@@ -64,7 +64,6 @@
 	import SegmentedControl from '#lib/ui/SegmentedControl.svelte';
 	import Select from '#lib/ui/Select.svelte';
 	import Slider from '#lib/ui/Slider.svelte';
-	import WaveSelector from './WaveSelector.svelte';
 	import EqPanel from './EqPanel.svelte';
 
 	const project = $derived(session.project);
@@ -535,17 +534,24 @@
 				</div>
 			{/if}
 
-			<Panel title="Source">
-				<Field label="Wave" stacked>
-					<WaveSelector
-						value={track.synth.wave}
-						wavetableId={track.synth.wavetableId}
-						position={track.synth.wavetablePosition}
-						accent={track.color}
-						onChange={(wave: WaveSource, wavetableId?: string) =>
-							updateSynth(track.id, { wave, wavetableId })}
+			<Panel title="Sound profile">
+				<Field label="Sound" stacked>
+					<Select
+						value={track.soundProfileId ?? ''}
+						options={project.soundProfiles.map((sound) => ({ value: sound.id, label: sound.name }))}
+						ariaLabel="Track sound profile"
+						onchange={(id) => selectTrackSound(track.id, id)}
 					/>
 				</Field>
+				<a href={`/sounds?sound=${track.soundProfileId ?? ''}`}>Open sound designer →</a>
+				<p class="note">Shared patch · edits update every track using this sound.</p>
+			</Panel>
+
+			<Panel title="Oscillator 1">
+				<p class="note">
+					Source: {track.synth.oscillators?.[0]?.wave ?? track.synth.wave}. Edit layers and source
+					assets in the sound designer.
+				</p>
 				<Field label="WT position">
 					<Slider
 						value={track.synth.wavetablePosition}

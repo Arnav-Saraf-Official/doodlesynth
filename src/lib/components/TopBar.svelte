@@ -57,7 +57,7 @@
 		</a>
 		<nav class="nav" aria-label="Sections">
 			<a href="/projects">Projects</a>
-			<a href="/wavetables">Wavetables</a>
+			<a href="/sounds">Sounds</a>
 			<a href="/tuning">Tuning</a>
 			<a href="/settings">Settings</a>
 			<a href="/help">Help</a>

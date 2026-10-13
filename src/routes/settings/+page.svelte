@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import Field from '#lib/ui/Field.svelte';
 	import IconButton from '#lib/ui/IconButton.svelte';
 	import NumberField from '#lib/ui/NumberField.svelte';
@@ -45,7 +46,7 @@
 		projects = await listProjects();
 	}
 
-	$effect(() => {
+	onMount(() => {
 		void refreshProjectList();
 	});
 
@@ -105,7 +106,7 @@
 		<nav>
 			<a href="/">Editor</a>
 			<a href="/projects">Projects</a>
-			<a href="/wavetables">Wavetables</a>
+			<a href="/sounds">Sounds</a>
 			<a href="/tuning">Tuning</a>
 			<a class="is-current" href="/settings">Settings</a>
 			<a href="/help">Help</a>

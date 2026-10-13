@@ -1,6 +1,5 @@
 <script lang="ts">
-	import type { WaveSource } from '#lib/model/types';
-	import { addTrack, removeTrack, updateTrackMixer } from '#lib/state/actions';
+	import { addTrack, removeTrack, selectTrackSound, updateTrackMixer } from '#lib/state/actions';
 	import {
 		MASTER_TRACK_ID,
 		isMasterSelected,
@@ -11,24 +10,14 @@
 
 	let creating = $state(false);
 	let draftName = $state('');
-	let draftWave = $state<WaveSource>('saw');
-
-	const WAVE_LABELS: Record<WaveSource, string> = {
-		sine: 'Sine',
-		triangle: 'Triangle',
-		saw: 'Saw',
-		square: 'Square',
-		pulse: 'Pulse',
-		'white-noise': 'White',
-		wavetable: 'Table'
-	};
+	let draftSoundId = $state('');
 
 	const tabs = $derived([
 		{
 			id: MASTER_TRACK_ID,
 			name: 'Master',
 			color: 'var(--color-fg-1)',
-			wave: null as WaveSource | null,
+			sound: null as string | null,
 			mute: session.project.master.mixer.mute,
 			solo: false
 		},
@@ -36,7 +25,9 @@
 			id: track.id,
 			name: track.name,
 			color: track.color,
-			wave: track.synth.wave,
+			sound:
+				session.project.soundProfiles.find((sound) => sound.id === track.soundProfileId)?.name ??
+				'Sound',
 			mute: track.mixer.mute,
 			solo: track.mixer.solo
 		}))
@@ -44,7 +35,8 @@
 
 	function commitCreate() {
 		const name = draftName.trim() || `Track ${session.project.tracks.length + 1}`;
-		addTrack(name, draftWave);
+		const id = addTrack(name);
+		if (draftSoundId) selectTrackSound(id, draftSoundId);
 		creating = false;
 		draftName = '';
 	}
@@ -73,8 +65,8 @@
 			>
 				<span class="dot" style="background:{tab.color}" aria-hidden="true"></span>
 				<span class="name">{tab.name}</span>
-				{#if tab.wave}
-					<span class="wave num">{WAVE_LABELS[tab.wave]}</span>
+				{#if tab.sound}
+					<span class="wave num">{tab.sound}</span>
 				{/if}
 			</button>
 
@@ -131,13 +123,11 @@
 						if (event.key === 'Escape') cancelCreate();
 					}}
 				/>
-				<select class="create-wave num" aria-label="Waveform" bind:value={draftWave}>
-					<option value="sine">Sine</option>
-					<option value="triangle">Triangle</option>
-					<option value="saw">Saw</option>
-					<option value="square">Square</option>
-					<option value="pulse">Pulse</option>
-					<option value="white-noise">White</option>
+				<select class="create-wave num" aria-label="Sound profile" bind:value={draftSoundId}>
+					<option value="">New initialized sound</option>
+					{#each session.project.soundProfiles as sound (sound.id)}<option value={sound.id}
+							>{sound.name}</option
+						>{/each}
 				</select>
 				<IconButton label="Create track" variant="solid" size="sm" onclick={commitCreate}>
 					Create

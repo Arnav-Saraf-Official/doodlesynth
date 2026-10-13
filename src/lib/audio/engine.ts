@@ -2,7 +2,7 @@
  * Web Audio playback.
  *
  * The project stays the single source of truth: pitch curves are continuous
- * functions of beat, automation lanes are functions of beat, and the transport
+ *	functions of beat, automation lanes are	functions of beat, and the transport
  * supplies the beat-to-time mapping. This module turns that data into scheduled
  * AudioParam ramps with a small rolling lookahead, so live playback, editing
  * while playing and the offline render used by tests all read the same values.
@@ -16,6 +16,8 @@
  *   is what the browser autoplay policy requires.
  */
 
+import { createDelay, createEffectRack, type DelayModule, type EffectRack } from './effects';
+import { oscillatorFromSynth } from '#lib/model/soundProfile';
 import { sampleLane } from '#lib/model/automation';
 import { curveBounds, sampleFrequencyAt } from '#lib/model/curve';
 import {
@@ -30,6 +32,8 @@ import type {
 	AutomationLane,
 	Curve,
 	ModEnvelope,
+	OscillatorSettings,
+	SoundProfile,
 	Project,
 	SynthSettings,
 	Track,
@@ -46,7 +50,8 @@ const RAMP_CHUNK_SECONDS = 0.05;
 const OFFLINE_SAMPLE_RATE = 48000;
 /** voices above this count are dropped when a track has too many curves */
 const MAX_VOICES = 64;
-const MAX_UNISON_VOICES = 7;
+const MAX_UNISON_VOICES = 16;
+export const MAX_SOURCE_NODES = 256;
 
 export interface EngineDebug {
 	playing: boolean;
@@ -54,6 +59,7 @@ export interface EngineDebug {
 	audioTime: number;
 	peak: number;
 	voices: number;
+	sources: number;
 }
 
 export interface RenderResult {
@@ -219,6 +225,10 @@ function ownedCopy(samples: Float32Array): Float32Array<ArrayBuffer> {
 interface TrackChain {
 	input: GainNode;
 	filter: BiquadFilterNode;
+	filter2: BiquadFilterNode;
+	filterInput: GainNode;
+	filter2Input: GainNode;
+	rack: EffectRack;
 	shaper: WaveShaperNode;
 	gain: GainNode;
 	panner: StereoPannerNode;
@@ -233,11 +243,15 @@ interface VoiceSource {
 	pitch: AudioParam | null;
 	/** unison detune multiplier applied to the voice pitch */
 	ratio: number;
+	level: GainNode;
+	panner: StereoPannerNode;
 }
 
 interface Voice {
 	curveId: string;
 	trackId: string;
+	oscillatorIndex: number;
+	oscillator: OscillatorSettings;
 	sources: VoiceSource[];
 	gain: GainNode;
 	bounds: { startTime: number; endTime: number };
@@ -252,8 +266,7 @@ interface MasterChain {
 	shaper: WaveShaperNode;
 	dry: GainNode;
 	delaySend: GainNode;
-	delay: DelayNode;
-	delayFeedback: GainNode;
+	delayModule: DelayModule;
 	delayReturn: GainNode;
 	reverbSend: GainNode;
 	convolver: ConvolverNode;
@@ -285,6 +298,7 @@ class PlaybackGraph {
 	private structureKey = '';
 	private lastDrive = new Map<string, number>();
 	private lastFilterType = new Map<string, string>();
+	private tableWaves = new Map<string, PeriodicWave>();
 	/** envelope runtimes, recomputed once per schedule window */
 	private modEnv = new Map<string, { envelope: ModEnvelope; triggers: number[] }[]>();
 
@@ -295,13 +309,11 @@ class PlaybackGraph {
 		this.startTime = startTime;
 		this.startSeconds = (startBeat * 60) / Math.max(project.tempo, 1);
 		this.pulse = pulseWave(ctx);
-		this.master = createMasterChain(ctx);
+		this.master = createMasterChain(ctx, project);
 		this.master.limiter.connect(this.master.analyser);
 		this.master.analyser.connect(ctx.destination);
 		this.analyserData = new Float32Array(this.master.analyser.fftSize);
-		if (project.tracks.some((track) => track.synth.wave === 'white-noise')) {
-			this.noiseBuffer = whiteNoiseBuffer(ctx);
-		}
+		this.noiseBuffer = whiteNoiseBuffer(ctx);
 		this.rebuildVoices();
 		this.structureKey = this.computeStructureKey();
 	}
@@ -350,6 +362,26 @@ class PlaybackGraph {
 				.filter((curve) => curve.points.length > 0 && !curve.muted)
 				.map((curve) => `${curve.id}:${Number((curve.phaseRandomization ?? 0).toFixed(3))}`);
 			if (curves.length === 0) continue;
+			parts.push(
+				JSON.stringify([
+					track.synth.oscillators,
+					track.synth.noise,
+					track.synth.effects,
+					track.synth.filter.enabled,
+					track.synth.filter2,
+					track.synth.delay.mode,
+					track.synth.outputDb
+				])
+			);
+			if (
+				track.synth.wave === 'wavetable' ||
+				track.synth.oscillators?.some((osc) => osc.wave === 'wavetable')
+			)
+				parts.push(
+					JSON.stringify(
+						this.project.wavetables.map((table) => table.frames.map((frame) => frame.source))
+					)
+				);
 			const unison = track.synth.unison;
 			parts.push(
 				`${track.id}:${track.synth.wave}:${track.synth.wavetableId ?? ''}:${Number(
@@ -369,9 +401,48 @@ class PlaybackGraph {
 			null
 		);
 	}
-	private createVoice(track: Track, curve: Curve): Voice | null {
+	private tableWave(table: Wavetable, position: number, phase: number): PeriodicWave {
+		const quantized = Math.round(clamp(position, 0, 1) * 64) / 64;
+		const key = `${table.id}:${quantized}:${phase}`;
+		const cached = this.tableWaves.get(key);
+		if (cached) return cached;
+		const samples = renderWavetableAt(table, quantized);
+		const real = new Float32Array(129),
+			imag = new Float32Array(129);
+		for (let n = 1; n < real.length; n++) {
+			let r = 0,
+				im = 0;
+			for (let index = 0; index < samples.length; index++) {
+				const angle = (2 * Math.PI * n * index) / samples.length;
+				r += samples[index] * Math.cos(angle);
+				im += samples[index] * Math.sin(angle);
+			}
+			r *= 2 / samples.length;
+			im *= 2 / samples.length;
+			const rotation = 2 * Math.PI * n * phase;
+			real[n] = r * Math.cos(rotation) + im * Math.sin(rotation);
+			imag[n] = im * Math.cos(rotation) - r * Math.sin(rotation);
+		}
+		const wave = this.ctx.createPeriodicWave(real, imag, { disableNormalization: true });
+		if (this.tableWaves.size > 256) this.tableWaves.clear();
+		this.tableWaves.set(key, wave);
+		return wave;
+	}
+
+	private createVoice(
+		track: Track,
+		curve: Curve,
+		oscillator: OscillatorSettings,
+		oscillatorIndex: number
+	): Voice | null {
 		const ctx = this.ctx;
-		const synth = track.synth;
+		const synth = {
+			...track.synth,
+			wave: oscillator.wave,
+			wavetableId: oscillator.wavetableId,
+			wavetablePosition: oscillator.wavetablePosition,
+			unison: oscillator.unison
+		};
 		const bounds = curveBounds(curve.points);
 		const gain = ctx.createGain();
 		gain.gain.value = 0;
@@ -390,7 +461,14 @@ class PlaybackGraph {
 		)}:${voiceCount}`;
 
 		const sources: VoiceSource[] = [];
-		const basePhase = phaseFraction(curve);
+		const basePhase =
+			(phaseFraction({
+				...curve,
+				id: `${curve.id}:${oscillatorIndex}`,
+				phaseRandomization: Math.max(curve.phaseRandomization ?? 0, oscillator.phaseRandomization)
+			}) +
+				oscillator.phase) %
+			1;
 		for (let index = 0; index < voiceCount; index++) {
 			// spread voices evenly across ±detuneCents, centred on the pitch
 			const offset = voiceCount === 1 ? 0 : (index / (voiceCount - 1)) * 2 - 1;
@@ -400,7 +478,7 @@ class PlaybackGraph {
 
 			let node: AudioScheduledSourceNode;
 			let pitch: AudioParam | null = null;
-			let startOffset = 0;
+			const startOffset = 0;
 
 			if (synth.wave === 'white-noise') {
 				if (!this.noiseBuffer) return null;
@@ -411,12 +489,9 @@ class PlaybackGraph {
 			} else if (synth.wave === 'wavetable') {
 				const table = this.tableFor(synth);
 				if (!table) return null;
-				const cycle = ctx.createBufferSource();
-				cycle.buffer = tableCycle(ctx, table, synth.wavetablePosition);
-				cycle.loop = true;
-				pitch = cycle.playbackRate;
-				// offset into the looping cycle is an exact phase shift
-				if (phase > 0) startOffset = phase * cycle.buffer.duration;
+				const cycle = ctx.createOscillator();
+				cycle.setPeriodicWave(this.tableWave(table, synth.wavetablePosition, phase));
+				pitch = cycle.frequency;
 				node = cycle;
 			} else {
 				const oscillator = ctx.createOscillator();
@@ -428,19 +503,27 @@ class PlaybackGraph {
 				node = oscillator;
 			}
 
-			node.connect(gain);
+			const level = ctx.createGain();
+			// Peak-safe normalization: identical in-phase copies equal one voice, not N voices.
+			level.gain.value = clamp(oscillator.level, 0, 1) / voiceCount;
+			const panner = ctx.createStereoPanner();
+			panner.pan.value = clamp(oscillator.pan + offset * (unison.stereoSpread ?? 0), -1, 1);
+			node.connect(level).connect(panner).connect(gain);
 			try {
-				if (startOffset > 0) (node as AudioBufferSourceNode).start(this.startTime, startOffset);
-				else node.start(this.startTime);
+				const start = Math.max(this.startTime, ctx.currentTime);
+				if (startOffset > 0) (node as AudioBufferSourceNode).start(start, startOffset);
+				else node.start(start);
 			} catch {
 				return null;
 			}
-			sources.push({ node, pitch, ratio });
+			sources.push({ node, pitch, ratio, level, panner });
 		}
 
 		return {
 			curveId: curve.id,
 			trackId: track.id,
+			oscillatorIndex,
+			oscillator,
 			sources,
 			gain,
 			bounds,
@@ -459,25 +542,65 @@ class PlaybackGraph {
 					// already stopped
 				}
 				source.node.disconnect();
+				source.level.disconnect();
+				source.panner.disconnect();
 			}
 			voice.gain.disconnect();
 		}
 		this.voices.length = 0;
+		for (const chain of this.tracks.values()) disconnectTrack(chain);
 		this.tracks.clear();
 		this.lastDrive.clear();
+		this.lastFilterType.clear();
+		this.tableWaves.clear();
 
 		let budget = MAX_VOICES;
+		let sourceBudget = MAX_SOURCE_NODES;
 		for (const track of this.project.tracks) {
 			if (!this.audible(track) || budget <= 0) continue;
-			const chain = createTrackChain(this.ctx, track, this.master);
+			const chain = createTrackChain(this.ctx, track, this.master, this.project.tempo);
 			this.tracks.set(track.id, chain);
 			for (const curve of track.curves) {
 				if (budget <= 0) break;
 				if (curve.points.length === 0 || curve.muted) continue;
-				const voice = this.createVoice(track, curve);
-				if (!voice) continue;
-				voice.gain.connect(chain.input);
-				this.voices.push(voice);
+				const oscillators = track.synth.oscillators ?? [oscillatorFromSynth(track.synth)];
+				const noise = track.synth.noise;
+				const layers = [...oscillators];
+				if (noise?.enabled)
+					layers.push({
+						...oscillatorFromSynth(track.synth),
+						wave: 'white-noise',
+						level: noise.level,
+						pan: noise.pan,
+						routing: 'direct'
+					});
+				const needed = layers
+					.filter((osc) => osc.enabled)
+					.reduce(
+						(sum, osc) =>
+							sum +
+							(osc.wave === 'white-noise'
+								? 1
+								: clamp(Math.round(osc.unison.voices), 1, MAX_UNISON_VOICES)),
+						0
+					);
+				// Admit whole notes only; never create a partial unison stack on exhaustion.
+				if (needed > sourceBudget) continue;
+				for (let index = 0; index < layers.length; index++) {
+					const osc = layers[index];
+					if (!osc.enabled) continue;
+					const voice = this.createVoice(track, curve, osc, index);
+					if (!voice) continue;
+					voice.gain.connect(
+						osc.routing === 'filter1'
+							? chain.filterInput
+							: osc.routing === 'filter2'
+								? chain.filter2Input
+								: chain.input
+					);
+					this.voices.push(voice);
+					sourceBudget -= voice.sources.length;
+				}
 				budget -= 1;
 			}
 		}
@@ -509,7 +632,7 @@ class PlaybackGraph {
 		type: BiquadFilterType,
 		enabled: boolean
 	): void {
-		const desired: BiquadFilterType = enabled ? type : 'lowpass';
+		const desired: BiquadFilterType = enabled ? type : 'allpass';
 		if (this.lastFilterType.get(key) !== desired) {
 			this.lastFilterType.set(key, desired);
 			chain.type = desired;
@@ -548,13 +671,14 @@ class PlaybackGraph {
 			const list = (envelopes ?? []).filter((envelope) => envelope.enabled);
 			return list.map((envelope) => {
 				const triggers = triggerBeatsFor(curves, envelope.trigger);
-				// every envelope also fires once when the transport starts
-				triggers.push(this.startBeat);
 				triggers.sort((a, b) => a - b);
 				return { envelope, triggers };
 			});
 		};
-		const master = build(this.project.master.modEnvelopes, []);
+		const master = build(
+			this.project.master.modEnvelopes,
+			this.project.tracks.flatMap((track) => track.curves)
+		);
 		if (master.length) this.modEnv.set('master', master);
 		for (const track of this.project.tracks) {
 			const list = build(track.modEnvelopes, track.curves);
@@ -572,9 +696,33 @@ class PlaybackGraph {
 	): number {
 		const base = this.laneValue(lanes, key, fallback, beat);
 		const runtimes = this.modEnv.get(scopeId);
-		if (!runtimes) return base;
 		let mod = 0;
-		for (const runtime of runtimes) {
+		const track = this.trackById(scopeId);
+		for (const lfo of track?.lfos ?? []) {
+			if (!lfo.enabled || lfo.destination !== key) continue;
+			const rate =
+				lfo.sync === 'free'
+					? lfo.rate
+					: 1 /
+						((Number(lfo.sync.split('/')[0]) / Number(lfo.sync.split('/')[1])) *
+							4 *
+							this.secondsPerBeat);
+			const phase = (((beat * this.secondsPerBeat * rate + lfo.phaseDegrees / 360) % 1) + 1) % 1;
+			const value =
+				lfo.wave === 'triangle'
+					? 1 - 4 * Math.abs(phase - 0.5)
+					: lfo.wave === 'square'
+						? phase < 0.5
+							? 1
+							: -1
+						: lfo.wave === 'saw-up'
+							? phase * 2 - 1
+							: lfo.wave === 'saw-down'
+								? 1 - phase * 2
+								: Math.sin(phase * Math.PI * 2);
+			mod += value * lfo.amount;
+		}
+		for (const runtime of runtimes ?? []) {
 			if (runtime.envelope.destination !== key) continue;
 			const index = lastTriggerIndex(runtime.triggers, beat);
 			if (index < 0) continue;
@@ -604,7 +752,8 @@ class PlaybackGraph {
 		const cents = this.laneValue(lanes, 'tuning.cents', 0, beat);
 		const ratio = this.laneValue(lanes, 'tuning.ratio', 1, beat);
 		let hz = sampleFrequencyAt(curve.points, beat) * ratio;
-		const semis = offset + (fine + cents) / 100;
+		const semis =
+			offset + voice.oscillator.transpose + (fine + cents + voice.oscillator.fineCents) / 100;
 		if (semis !== 0) hz *= Math.pow(2, semis / 12);
 		return clamp(hz, 0.01, 20000);
 	}
@@ -619,8 +768,10 @@ class PlaybackGraph {
 		const sinceStart = (beat - voice.bounds.startTime) * this.secondsPerBeat;
 		const untilEnd = (voice.bounds.endTime - beat) * this.secondsPerBeat;
 		// the release tail may ring past the last point; everything else stops
-		if (untilEnd < -Math.max(0, curve.envelope.release)) return 0;
-		return dbToGain(curve.gainDb) * envelopeLevel(curve, sinceStart, untilEnd);
+		if (untilEnd < -Math.max(0, track.synth.envelope?.release ?? curve.envelope.release)) return 0;
+		const patchEnvelope = track.synth.envelope;
+		const envelopeCurve = patchEnvelope ? { ...curve, envelope: patchEnvelope } : curve;
+		return dbToGain(curve.gainDb) * envelopeLevel(envelopeCurve, sinceStart, untilEnd);
 	}
 
 	/* ----------------------------------------------------------- scheduling */
@@ -687,7 +838,11 @@ class PlaybackGraph {
 			{ cancel }
 		);
 		const masterFilter = master.synth.filter;
+		this.master.filter.gain.value = masterFilter.gainDb ?? 0;
 		this.syncFilterType(this.master.filter, 'master', masterFilter.type, masterFilter.enabled);
+		this.master.input.disconnect();
+		if (masterFilter.enabled) this.master.input.connect(this.master.filter);
+		else this.master.input.connect(this.master.shaper);
 		if (masterFilter.enabled) {
 			this.scheduleParam(
 				this.master.filter.frequency,
@@ -763,8 +918,7 @@ class PlaybackGraph {
 			{ cancel }
 		);
 		// master delay time / feedback are plain settings, not lanes
-		this.master.delay.delayTime.value = clamp(master.synth.delay.time, 0.01, 2);
-		this.master.delayFeedback.gain.value = clamp(master.synth.delay.feedback, 0, 0.95);
+		this.master.delayModule.update(master.synth.delay, this.project.tempo, 1);
 		// master drive is a curve, not a value: refresh when the amount moves
 		const masterDrive = this.envelopedValue(
 			'master',
@@ -776,7 +930,7 @@ class PlaybackGraph {
 		const lastMasterDrive = this.lastDrive.get('master') ?? -1;
 		if (Math.abs(masterDrive - lastMasterDrive) > 0.005) {
 			this.lastDrive.set('master', masterDrive);
-			this.master.shaper.curve = driveCurve(clamp(masterDrive, 0, 1));
+			this.master.shaper.curve = masterDrive <= 0 ? null : driveCurve(clamp(masterDrive, 0, 1));
 		}
 
 		/* voices */
@@ -784,14 +938,48 @@ class PlaybackGraph {
 			this.scheduleParam(voice.gain.gain, (time) => this.voiceLevel(voice, time), from, to, {
 				cancel
 			});
+			if (voice.wave === 'wavetable') {
+				const track = this.trackById(voice.trackId);
+				const table = this.tableFor({
+					...(track?.synth ?? this.project.tracks[0].synth),
+					wavetableId: voice.oscillator.wavetableId
+				});
+				const position = track
+					? clamp(
+							this.envelopedValue(
+								track.id,
+								track.automationLanes,
+								'wavetable.position',
+								voice.oscillator.wavetablePosition,
+								nowBeat
+							),
+							0,
+							1
+						)
+					: voice.oscillator.wavetablePosition;
+				if (table && Math.round(position * 64) !== Math.round(voice.wavetablePosition * 64)) {
+					voice.wavetablePosition = position;
+					for (let index = 0; index < voice.sources.length; index++) {
+						const phase =
+							(phaseFraction({
+								...this.curveOf(voice)!,
+								id: `${voice.curveId}:${voice.oscillatorIndex}`,
+								phaseRandomization: voice.oscillator.phaseRandomization
+							}) +
+								voice.oscillator.phase +
+								(index / voice.sources.length) * voice.oscillator.unison.phaseSpread) %
+							1;
+						(voice.sources[index].node as OscillatorNode).setPeriodicWave(
+							this.tableWave(table, position, phase)
+						);
+					}
+				}
+			}
 			for (const source of voice.sources) {
 				if (!source.pitch) continue;
 				this.scheduleParam(
 					source.pitch,
-					(time) =>
-						(voice.wave === 'wavetable'
-							? this.waveRate(voice, time)
-							: this.voicePitch(voice, time)) * source.ratio,
+					(time) => this.voicePitch(voice, time) * source.ratio,
 					from,
 					to,
 					{ cancel }
@@ -806,6 +994,37 @@ class PlaybackGraph {
 			const synth = track.synth;
 			const lanes = track.automationLanes;
 			this.syncFilterType(chain.filter, trackId, synth.filter.type, synth.filter.enabled);
+			chain.filter.gain.value = synth.filter.gainDb ?? 0;
+			const filter2 = synth.filter2;
+			if (filter2) {
+				chain.filter2.type = filter2.type;
+				chain.filter2.frequency.value = clamp(filter2.cutoff, 20, 20000);
+				chain.filter2.Q.value = clamp(filter2.resonance, 0, 30);
+				chain.filter2.gain.value = filter2.gainDb ?? 0;
+			}
+			const delayMix = this.envelopedValue(
+				trackId,
+				lanes,
+				'fx.delay.mix',
+				synth.effects?.find((effect) => effect.kind === 'delay')?.mix ?? 0,
+				nowBeat
+			);
+			chain.rack.delay?.update(synth.delay, this.project.tempo, delayMix);
+			if (chain.rack.reverb) {
+				const mix = clamp(
+					this.envelopedValue(
+						trackId,
+						lanes,
+						'fx.reverb.mix',
+						synth.effects?.find((effect) => effect.kind === 'reverb')?.mix ?? 0,
+						nowBeat
+					),
+					0,
+					1
+				);
+				chain.rack.reverb.wet.gain.value = mix;
+				chain.rack.reverb.dry.gain.value = 1 - mix;
+			}
 			this.scheduleParam(
 				chain.gain.gain,
 				(time) =>
@@ -814,7 +1033,7 @@ class PlaybackGraph {
 							trackId,
 							lanes,
 							'volume',
-							track.mixer.volumeDb,
+							track.mixer.volumeDb + (synth.outputDb ?? 0),
 							this.beatAtTime(time)
 						)
 					),
@@ -876,13 +1095,7 @@ class PlaybackGraph {
 				chain.delaySend.gain,
 				(time) =>
 					clamp(
-						this.envelopedValue(
-							trackId,
-							lanes,
-							'fx.delay.mix',
-							synth.delay.mix,
-							this.beatAtTime(time)
-						),
+						this.envelopedValue(trackId, lanes, 'fx.delay.mix', 0, this.beatAtTime(time)),
 						0,
 						1
 					),
@@ -894,13 +1107,7 @@ class PlaybackGraph {
 				chain.reverbSend.gain,
 				(time) =>
 					clamp(
-						this.envelopedValue(
-							trackId,
-							lanes,
-							'fx.reverb.mix',
-							synth.reverb.mix,
-							this.beatAtTime(time)
-						),
+						this.envelopedValue(trackId, lanes, 'fx.reverb.mix', 0, this.beatAtTime(time)),
 						0,
 						1
 					),
@@ -913,19 +1120,9 @@ class PlaybackGraph {
 			const lastDrive = this.lastDrive.get(trackId) ?? -1;
 			if (Math.abs(drive - lastDrive) > 0.005) {
 				this.lastDrive.set(trackId, drive);
-				chain.shaper.curve = driveCurve(clamp(drive, 0, 1));
+				chain.shaper.curve = drive <= 0 ? null : driveCurve(clamp(drive, 0, 1));
 			}
 		}
-	}
-
-	/** Wavetable voices read a looping cycle buffer: rate = f * N / sampleRate. */
-	private waveRate(voice: Voice, time: number): number {
-		const track = this.trackById(voice.trackId);
-		if (!track) return 1;
-		const table = this.tableFor(track.synth);
-		const length = table?.sampleLength ?? 2048;
-		const hz = this.voicePitch(voice, time);
-		return clamp((hz * length) / this.ctx.sampleRate, 0.0001, 1024);
 	}
 
 	peak(): number {
@@ -947,6 +1144,8 @@ class PlaybackGraph {
 					// already stopped
 				}
 				source.node.disconnect();
+				source.level.disconnect();
+				source.panner.disconnect();
 			}
 			voice.gain.disconnect();
 		}
@@ -957,27 +1156,16 @@ class PlaybackGraph {
 	}
 }
 
-/** One-cycle buffer for a wavetable morph position (Float32Array samples). */
-function tableCycle(ctx: BaseAudioContext, table: Wavetable, position: number): AudioBuffer {
-	const samples = renderWavetableAt(table, position);
-	const buffer = ctx.createBuffer(1, samples.length, ctx.sampleRate);
-	buffer.copyToChannel(ownedCopy(samples), 0);
-	return buffer;
-}
-
-function createMasterChain(ctx: BaseAudioContext): MasterChain {
+function createMasterChain(ctx: BaseAudioContext, project: Project): MasterChain {
 	const input = ctx.createGain();
 	const filter = ctx.createBiquadFilter();
 	filter.type = 'lowpass';
 	filter.frequency.value = 18000;
 	const shaper = ctx.createWaveShaper();
-	shaper.curve = driveCurve(0);
+	shaper.curve = null;
 	const dry = ctx.createGain();
 	const delaySend = ctx.createGain();
-	const delay = ctx.createDelay(2);
-	delay.delayTime.value = 0.25;
-	const delayFeedback = ctx.createGain();
-	delayFeedback.gain.value = 0.3;
+	const delayModule = createDelay(ctx, { ...project.master.synth.delay, mix: 1 }, project.tempo);
 	const delayReturn = ctx.createGain();
 	const reverbSend = ctx.createGain();
 	const convolver = ctx.createConvolver();
@@ -995,15 +1183,14 @@ function createMasterChain(ctx: BaseAudioContext): MasterChain {
 	const analyser = ctx.createAnalyser();
 	analyser.fftSize = 2048;
 
-	input.connect(filter);
 	filter.connect(shaper);
+	if (project.master.synth.filter.enabled) input.connect(filter);
+	else input.connect(shaper);
 	shaper.connect(dry);
 	dry.connect(gain);
 	shaper.connect(delaySend);
-	delaySend.connect(delay);
-	delay.connect(delayFeedback);
-	delayFeedback.connect(delay);
-	delay.connect(delayReturn);
+	delaySend.connect(delayModule.input);
+	delayModule.output.connect(delayReturn);
 	delayReturn.connect(gain);
 	shaper.connect(reverbSend);
 	reverbSend.connect(convolver);
@@ -1018,8 +1205,7 @@ function createMasterChain(ctx: BaseAudioContext): MasterChain {
 		shaper,
 		dry,
 		delaySend,
-		delay,
-		delayFeedback,
+		delayModule,
 		delayReturn,
 		reverbSend,
 		convolver,
@@ -1031,15 +1217,41 @@ function createMasterChain(ctx: BaseAudioContext): MasterChain {
 	};
 }
 
-function createTrackChain(ctx: BaseAudioContext, track: Track, master: MasterChain): TrackChain {
+function createTrackChain(
+	ctx: BaseAudioContext,
+	track: Track,
+	master: MasterChain,
+	tempo: number
+): TrackChain {
 	const synth = track.synth;
 	const input = ctx.createGain();
+	const filterInput = ctx.createGain();
+	const filter2Input = ctx.createGain();
+	const filter2 = ctx.createBiquadFilter();
+	const legacyEffects = [];
+	if (synth.delay.mix > 0)
+		legacyEffects.push({
+			id: 'legacy-delay',
+			kind: 'delay' as const,
+			enabled: true,
+			mix: synth.delay.mix,
+			params: {}
+		});
+	if (synth.reverb.mix > 0)
+		legacyEffects.push({
+			id: 'legacy-reverb',
+			kind: 'reverb' as const,
+			enabled: true,
+			mix: synth.reverb.mix,
+			params: { decay: 1.6, preDelay: 0, damping: 12000 }
+		});
+	const rack = createEffectRack(ctx, synth.effects ?? legacyEffects, synth.delay, tempo);
 	const filter = ctx.createBiquadFilter();
 	filter.type = synth.filter.type;
 	filter.frequency.value = synth.filter.cutoff;
 	filter.Q.value = synth.filter.resonance;
 	const shaper = ctx.createWaveShaper();
-	shaper.curve = driveCurve(synth.drive);
+	shaper.curve = synth.drive > 0 ? driveCurve(synth.drive) : null;
 	const gain = ctx.createGain();
 	gain.gain.value = dbToGain(track.mixer.volumeDb);
 	const panner = ctx.createStereoPanner();
@@ -1049,22 +1261,41 @@ function createTrackChain(ctx: BaseAudioContext, track: Track, master: MasterCha
 	const reverbSend = ctx.createGain();
 	reverbSend.gain.value = 0;
 
-	input.connect(filter);
-	filter.connect(shaper);
-	shaper.connect(gain);
+	// Real bypass paths: disabled filters do not process the source at all.
+	if (synth.filter.enabled) filterInput.connect(filter).connect(input);
+	else filterInput.connect(input);
+	if (synth.filter2?.enabled) filter2Input.connect(filter2).connect(input);
+	else filter2Input.connect(input);
+	input.connect(shaper).connect(rack.input);
+	rack.output.connect(gain);
 	gain.connect(panner);
 	// dry path into the master input, sends into the shared master effects
 	panner.connect(master.input);
 	panner.connect(delaySend);
 	panner.connect(reverbSend);
-	delaySend.connect(master.delaySend);
-	reverbSend.connect(master.reverbSend);
+	// Patch effects are independent insert racks, never shared master sends.
 
-	return { input, filter, shaper, gain, panner, delaySend, reverbSend };
+	return {
+		input,
+		filter,
+		filter2,
+		filterInput,
+		filter2Input,
+		rack,
+		shaper,
+		gain,
+		panner,
+		delaySend,
+		reverbSend
+	};
 }
 
 function disconnectTrack(chain: TrackChain): void {
 	chain.input.disconnect();
+	chain.filterInput.disconnect();
+	chain.filter2Input.disconnect();
+	chain.filter2.disconnect();
+	chain.rack.dispose();
 	chain.filter.disconnect();
 	chain.shaper.disconnect();
 	chain.gain.disconnect();
@@ -1079,7 +1310,7 @@ function disconnectMaster(master: MasterChain): void {
 	master.shaper.disconnect();
 	master.dry.disconnect();
 	master.delaySend.disconnect();
-	master.delayFeedback.disconnect();
+	master.delayModule.dispose();
 	master.delayReturn.disconnect();
 	master.reverbSend.disconnect();
 	master.convolver.disconnect();
@@ -1099,6 +1330,10 @@ class SynthEngine {
 	private timer: ReturnType<typeof setInterval> | null = null;
 	private scheduledUntil = 0;
 	private wantPlay = false;
+	private audition: PlaybackGraph | null = null;
+	private auditionRequest = 0;
+	private auditionTimer: ReturnType<typeof setInterval> | null = null;
+	private auditionTimeout: ReturnType<typeof setTimeout> | null = null;
 
 	/** Snapshot used for scheduling. Called on every project mutation. */
 	setProject(project: Project): void {
@@ -1107,6 +1342,7 @@ class SynthEngine {
 			// the graph re-reads the live snapshot: rebuild when structure changed
 			this.graph.project = project;
 			this.graph.maybeRebuild();
+			if (this.ctx) this.scheduledUntil = this.ctx.currentTime;
 		}
 	}
 
@@ -1197,6 +1433,93 @@ class SynthEngine {
 
 	/* ------------------------------------------------------------ previews */
 
+	/** Audition uses the same graph, layers, modulation and rack as timeline playback. */
+	async previewSound(profile: SoundProfile, frequency: number, seconds = 1.5): Promise<void> {
+		if (!this.project) throw new Error('No project loaded');
+		this.stopPreviewSound();
+		const request = this.auditionRequest;
+		const ctx = await this.context();
+		if (request !== this.auditionRequest) return;
+		const durationBeats = seconds / (60 / this.project.tempo);
+		const curve: Curve = {
+			id: 'audition',
+			name: 'Audition',
+			points: [
+				{ id: 'a', time: 0, frequency, interpolation: 'linear' },
+				{ id: 'b', time: durationBeats, frequency, interpolation: 'linear' }
+			],
+			envelope: profile.synth.envelope ?? {
+				attack: profile.synth.attack,
+				decay: 0.04,
+				sustain: 0.8,
+				release: profile.synth.release
+			},
+			gainDb: 0,
+			pan: 0,
+			muted: false
+		};
+		const track: Track = {
+			id: 'audition',
+			name: profile.name,
+			color: '#4da3ff',
+			pitchRepresentation: 'absolute-hz',
+			tuningFollow: 'master',
+			synth: profile.synth,
+			lfos: profile.lfos,
+			modEnvelopes: profile.modEnvelopes,
+			curves: [curve],
+			automationLanes: [],
+			mixer: { volumeDb: 0, pan: 0, mute: false, solo: false }
+		};
+		const project: Project = {
+			...this.project,
+			tracks: [track],
+			loop: { ...this.project.loop, enabled: false },
+			master: {
+				...this.project.master,
+				synth: {
+					...this.project.master.synth,
+					filter: { ...this.project.master.synth.filter, enabled: false },
+					drive: 0,
+					delay: { ...this.project.master.synth.delay, mix: 0 },
+					reverb: { mix: 0 }
+				},
+				automationLanes: [],
+				modEnvelopes: [],
+				mixer: { volumeDb: 0, pan: 0, mute: false, solo: false }
+			}
+		};
+		const graph = new PlaybackGraph(ctx, project, 0, ctx.currentTime);
+		this.audition = graph;
+		const schedule = () => graph.schedule(ctx.currentTime, ctx.currentTime + LOOKAHEAD_SECONDS);
+		schedule();
+		this.auditionTimer = setInterval(schedule, TICK_MS);
+		this.auditionTimeout = setTimeout(
+			() => this.stopPreviewSound(),
+			(seconds + Math.max(profile.synth.envelope?.release ?? 0.1, 0.1) + 3) * 1000
+		);
+	}
+
+	stopPreviewSound(): void {
+		this.auditionRequest++;
+		if (this.auditionTimer) clearInterval(this.auditionTimer);
+		if (this.auditionTimeout) clearTimeout(this.auditionTimeout);
+		this.auditionTimer = this.auditionTimeout = null;
+		this.audition?.dispose();
+		this.audition = null;
+	}
+
+	analysis(spectrum = false): number[] {
+		const graph = this.audition ?? this.graph;
+		if (!graph) return [];
+		const data = new Float32Array(
+			spectrum ? graph.master.analyser.frequencyBinCount : graph.master.analyser.fftSize
+		);
+		if (spectrum) graph.master.analyser.getFloatFrequencyData(data);
+		else graph.master.analyser.getFloatTimeDomainData(data);
+		return Array.from(data);
+	}
+
 	async previewTone(frequency: number, seconds = 1.2): Promise<void> {
 		const ctx = await this.context();
 		const oscillator = ctx.createOscillator();
@@ -1261,6 +1584,19 @@ class SynthEngine {
 	 */
 	async renderOffline(fromBeat: number, seconds: number): Promise<RenderResult> {
 		if (!this.project) throw new Error('engine has no project');
+		const rendered = await this.renderOfflineBuffer(fromBeat, seconds);
+		const data = rendered.getChannelData(0);
+		let peak = 0,
+			sum = 0;
+		for (const value of data) {
+			peak = Math.max(peak, Math.abs(value));
+			sum += value * value;
+		}
+		return { peak, rms: Math.sqrt(sum / data.length), length: data.length };
+	}
+
+	async renderOfflineBuffer(fromBeat: number, seconds: number): Promise<AudioBuffer> {
+		if (!this.project) throw new Error('engine has no project');
 		const length = Math.max(1, Math.ceil(seconds * OFFLINE_SAMPLE_RATE));
 		const OfflineCtor: typeof OfflineAudioContext =
 			typeof OfflineAudioContext !== 'undefined'
@@ -1269,19 +1605,11 @@ class SynthEngine {
 						.webkitOfflineAudioContext as typeof OfflineAudioContext);
 		const ctx = new OfflineCtor(2, length, OFFLINE_SAMPLE_RATE);
 		const graph = new PlaybackGraph(ctx, this.project, fromBeat, 0);
-		graph.schedule(0, length / OFFLINE_SAMPLE_RATE, false);
+		for (let time = 0; time < seconds; time += LOOKAHEAD_SECONDS)
+			graph.schedule(time, Math.min(seconds, time + LOOKAHEAD_SECONDS), false);
 		const rendered = await ctx.startRendering();
-		const data = rendered.getChannelData(0);
-		let peak = 0;
-		let sum = 0;
-		for (let i = 0; i < data.length; i++) {
-			const value = data[i];
-			const magnitude = Math.abs(value);
-			if (magnitude > peak) peak = magnitude;
-			sum += value * value;
-		}
 		graph.dispose();
-		return { peak, rms: Math.sqrt(sum / data.length), length: data.length };
+		return rendered;
 	}
 
 	debugState(): EngineDebug {
@@ -1290,7 +1618,10 @@ class SynthEngine {
 			contextState: this.ctx?.state ?? 'none',
 			audioTime: this.ctx?.currentTime ?? 0,
 			peak: this.graph ? this.graph.peak() : 0,
-			voices: this.graph ? this.graph.voices.length : 0
+			voices: this.graph ? new Set(this.graph.voices.map((voice) => voice.curveId)).size : 0,
+			sources: this.graph
+				? this.graph.voices.reduce((count, voice) => count + voice.sources.length, 0)
+				: 0
 		};
 	}
 }

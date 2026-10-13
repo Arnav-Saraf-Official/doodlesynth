@@ -185,7 +185,7 @@
 		<nav>
 			<a href="/">Editor</a>
 			<a href="/projects">Projects</a>
-			<a href="/wavetables">Wavetables</a>
+			<a href="/sounds">Sounds</a>
 			<a class="is-current" href="/tuning">Tuning</a>
 			<a href="/settings">Settings</a>
 			<a href="/help">Help</a>

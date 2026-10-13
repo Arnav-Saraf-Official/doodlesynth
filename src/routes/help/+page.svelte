@@ -49,7 +49,7 @@
 			<nav aria-label="Primary">
 				<a href="/">Editor</a>
 				<a href="/projects">Projects</a>
-				<a href="/wavetables">Wavetables</a>
+				<a href="/sounds">Sounds</a>
 				<a href="/tuning">Tuning</a>
 				<a href="/settings">Settings</a>
 				<a class="is-current" href="/help" aria-current="page">Help</a>

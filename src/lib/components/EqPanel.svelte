@@ -14,6 +14,7 @@
 		type: FilterType;
 		cutoff: number;
 		resonance: number;
+		gainDb?: number;
 	}
 
 	interface Props {
@@ -67,7 +68,9 @@
 		const w0 = (2 * Math.PI * f0) / sampleRate;
 		const cos = Math.cos(w0);
 		const sin = Math.sin(w0);
-		const alpha = sin / (2 * Math.max(0.0001, q));
+		const effectiveQ =
+			type === 'lowpass' || type === 'highpass' ? Math.pow(10, q / 20) : Math.max(0.0001, q);
+		const alpha = sin / (2 * effectiveQ);
 		switch (type) {
 			case 'highpass':
 				return {
@@ -83,7 +86,7 @@
 			case 'notch':
 				return { b0: 1, b1: -2 * cos, b2: 1, a0: 1 + alpha, a1: -2 * cos, a2: 1 - alpha };
 			case 'peaking': {
-				const a = Math.pow(10, 0.05); // fixed +14 dB boost: resonance drives depth
+				const a = Math.pow(10, (filter.gainDb ?? 0) / 40);
 				return {
 					b0: 1 + alpha * a,
 					b1: -2 * cos,
@@ -94,8 +97,8 @@
 				};
 			}
 			case 'lowshelf': {
-				const a = Math.pow(10, 0.05);
-				const twoRootAAlpha = 2 * Math.sqrt(a) * alpha;
+				const a = Math.pow(10, (filter.gainDb ?? 0) / 40);
+				const twoRootAAlpha = Math.sqrt(2 * a) * sin;
 				return {
 					b0: a * (a + 1 - (a - 1) * cos + twoRootAAlpha),
 					b1: 2 * a * (a - 1 - (a + 1) * cos),
@@ -106,8 +109,8 @@
 				};
 			}
 			case 'highshelf': {
-				const a = Math.pow(10, 0.05);
-				const twoRootAAlpha = 2 * Math.sqrt(a) * alpha;
+				const a = Math.pow(10, (filter.gainDb ?? 0) / 40);
+				const twoRootAAlpha = Math.sqrt(2 * a) * sin;
 				return {
 					b0: a * (a + 1 + (a - 1) * cos + twoRootAAlpha),
 					b1: -2 * a * (a - 1 + (a + 1) * cos),
@@ -118,6 +121,14 @@
 				};
 			}
 			case 'allpass':
+				return {
+					b0: 1 - alpha,
+					b1: -2 * cos,
+					b2: 1 + alpha,
+					a0: 1 + alpha,
+					a1: -2 * cos,
+					a2: 1 - alpha
+				};
 			case 'lowpass':
 			default:
 				return {
@@ -194,7 +205,7 @@
 
 	/* ------------------------------------------------------ drawing */
 
-	$effect(() => {
+	function drawResponse() {
 		const element = canvas;
 		if (!element) return;
 		const dpr = window.devicePixelRatio || 1;
@@ -283,7 +294,8 @@
 			context.textAlign = 'right';
 			context.fillText('BYPASS', width - PAD.right, PAD.top + 10);
 		}
-	});
+	}
+	$effect(drawResponse);
 
 	/* ---------------------------------------------------- pointer */
 
@@ -364,7 +376,12 @@
 	</div>
 	<div class="canvas-shell">
 		<canvas
-			bind:this={canvas}
+			{@attach (element) => {
+				canvas = element;
+				return () => {
+					canvas = null;
+				};
+			}}
 			bind:clientWidth={width}
 			bind:clientHeight={height}
 			tabindex="0"

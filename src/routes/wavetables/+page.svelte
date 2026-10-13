@@ -47,6 +47,7 @@
 		updateWavetableFrame
 	} from '#lib/state/actions';
 	import {
+		initSession,
 		canRedo,
 		canUndo,
 		redo,
@@ -101,6 +102,7 @@
 	// value and the project is updated once the gesture settles.
 	let draftSource = $state<WavetableFrameSource | null>(null);
 	let draftFrameId: string | null = null;
+	let draftTableId: string | null = null;
 	let commitHandle: ReturnType<typeof setTimeout> | null = null;
 
 	const activeSource = $derived<WavetableFrameSource | null>(
@@ -110,6 +112,7 @@
 	function queueSource(source: WavetableFrameSource): void {
 		draftSource = source;
 		draftFrameId = frame?.id ?? null;
+		draftTableId = table?.id ?? null;
 		if (commitHandle) clearTimeout(commitHandle);
 		commitHandle = setTimeout(flushSource, 180);
 	}
@@ -118,20 +121,14 @@
 		const id = draftFrameId;
 		const source = draftSource;
 		commitHandle = null;
-		if (!table || !id || !source) return;
-		updateWavetableFrame(table.id, id, (entry) => ({ ...entry, source }), 'Edit wavetable frame');
+		if (!draftTableId || !id || !source) return;
+		updateWavetableFrame(
+			draftTableId,
+			id,
+			(entry) => ({ ...entry, source }),
+			'Edit wavetable frame'
+		);
 	}
-
-	$effect(() => {
-		if (frame && draftFrameId && draftFrameId !== frame.id) {
-			draftSource = null;
-			draftFrameId = null;
-		}
-		if (!selectedTableId && tables.length) selectedTableId = tables[0].id;
-		if (table && !frames.some((entry) => entry.id === selectedFrameId)) {
-			selectedFrameId = frames[0]?.id ?? null;
-		}
-	});
 
 	/* ------------------------------------------------------------- preview */
 
@@ -189,9 +186,7 @@
 
 	// drawMorph reads the samples, the morph position and the repeat count,
 	// which makes those the effect's dependencies
-	$effect(() => {
-		drawMorph();
-	});
+	$effect(drawMorph);
 
 	/** Audible preview of exactly what the canvas shows at the chosen note. */
 	async function playPreview(): Promise<void> {
@@ -207,14 +202,12 @@
 	}
 
 	// morph LFO preview: animates the position, nothing is played
-	$effect(() => {
-		if (!lfoRunning) return;
+	onMount(() => {
 		let frameHandle = 0;
 		const started = performance.now();
 		const step = () => {
-			if (!lfoRunning) return;
-			const elapsed = (performance.now() - started) / 1000;
-			morph = (Math.sin(elapsed * Math.PI * 2 * lfoRate) + 1) / 2;
+			if (lfoRunning)
+				morph = (Math.sin(((performance.now() - started) / 1000) * Math.PI * 2 * lfoRate) + 1) / 2;
 			frameHandle = requestAnimationFrame(step);
 		};
 		frameHandle = requestAnimationFrame(step);
@@ -248,6 +241,7 @@
 	// every wavetable edit is a project command, so the page-wide undo stack
 	// already covers frame edits, conversions and library changes
 	onMount(() => {
+		void initSession();
 		const onKeyDown = (event: KeyboardEvent) => {
 			if (isEditableTarget(event.target)) return;
 			const mod = event.ctrlKey || event.metaKey;
@@ -444,6 +438,7 @@
 		<nav class="page-nav" aria-label="Sections">
 			<a href="/">Editor</a>
 			<a href="/projects">Projects</a>
+			<a href="/sounds">Sounds</a>
 			<a href="/tuning">Tuning</a>
 			<a href="/settings">Settings</a>
 			<a href="/help">Help</a>
@@ -638,7 +633,15 @@
 						{lfoRunning ? 'Stop LFO' : 'Run LFO'}
 					</IconButton>
 					<div class="preview-canvas">
-						<canvas bind:this={morphCanvas} aria-label="Morphed waveform preview"></canvas>
+						<canvas
+							{@attach (element) => {
+								morphCanvas = element;
+								return () => {
+									morphCanvas = null;
+								};
+							}}
+							aria-label="Morphed waveform preview"
+						></canvas>
 					</div>
 					<span class="preview-caption num">
 						{`${midiToName(previewNote)} · ${previewFrequency.toFixed(1)} Hz · ×${previewRepeats}`}
@@ -742,7 +745,12 @@
 
 					<div
 						class="strip"
-						bind:this={strip}
+						{@attach (element) => {
+							strip = element;
+							return () => {
+								strip = null;
+							};
+						}}
 						role="listbox"
 						aria-label="Wavetable frames"
 						tabindex="0"

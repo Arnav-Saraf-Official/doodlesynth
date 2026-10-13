@@ -277,7 +277,74 @@ export interface UnisonSettings {
 	phaseSpread: number;
 }
 
+export interface DelaySettings {
+	mix: number;
+	time: number;
+	feedback: number;
+	mode?: 'mono' | 'stereo' | 'ping-pong';
+	sync?: boolean;
+	beats?: number;
+	rightTime?: number;
+	rightBeats?: number;
+	lowCut?: number;
+	highCut?: number;
+	width?: number;
+}
+
+export interface OscillatorSettings {
+	enabled: boolean;
+	wave: WaveSource;
+	wavetableId?: Id;
+	wavetablePosition: number;
+	transpose: number;
+	fineCents: number;
+	level: number;
+	pan: number;
+	phase: number;
+	phaseRandomization: number;
+	unison: UnisonSettings & { stereoSpread?: number };
+	routing: 'filter1' | 'filter2' | 'direct';
+}
+
+export type EffectKind =
+	| 'chorus'
+	| 'compressor'
+	| 'delay'
+	| 'distortion'
+	| 'eq'
+	| 'filter'
+	| 'flanger'
+	| 'phaser'
+	| 'reverb';
+export interface SoundEffect {
+	id: Id;
+	kind: EffectKind;
+	enabled: boolean;
+	mix: number;
+	/** Effect-specific controls, in the units displayed by the editor. */
+	params: Record<string, number>;
+}
+
+export interface SoundProfile {
+	id: Id;
+	name: string;
+	category: string;
+	/** Project-local bookmark; absent on older projects. */
+	favorite?: boolean;
+	synth: SynthSettings;
+	lfos: Lfo[];
+	modEnvelopes: ModEnvelope[];
+	importWarnings?: string[];
+}
+
 export interface SynthSettings {
+	/** Layered patch sources; absent on legacy single-oscillator projects. */
+	oscillators?: OscillatorSettings[];
+	noise?: { enabled: boolean; level: number; pan: number };
+	filter2?: SynthSettings['filter'];
+	envelope?: Envelope;
+	effects?: SoundEffect[];
+	outputDb?: number;
 	wave: WaveSource;
 	wavetableId?: Id;
 	/** 0 .. 1 morph position through the wavetable frames */
@@ -290,9 +357,10 @@ export interface SynthSettings {
 		type: FilterType;
 		cutoff: number;
 		resonance: number;
+		gainDb?: number;
 	};
 	drive: number;
-	delay: { mix: number; time: number; feedback: number };
+	delay: DelaySettings;
 	reverb: { mix: number };
 	attack: number;
 	release: number;
@@ -326,6 +394,8 @@ export interface MixerState {
 
 export interface Track {
 	id: Id;
+	/** Shared project patch; synth/lfos/modEnvelopes remain resolved snapshots. */
+	soundProfileId?: Id;
 	name: string;
 	/** one of the --track-N accents */
 	color: string;
@@ -408,6 +478,7 @@ export interface Project {
 	tracks: Track[];
 	master: MasterTrack;
 	wavetables: Wavetable[];
+	soundProfiles: SoundProfile[];
 	scales: ScaleDefinition[];
 	markers: Marker[];
 	loop: LoopRegion;

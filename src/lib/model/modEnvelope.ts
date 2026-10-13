@@ -38,7 +38,7 @@ export function envelopeValueAt(envelope: ModEnvelope, phaseBeats: number): numb
 	const decay = Math.max(0, envelope.decayBeats);
 	if (attack === 0 && decay === 0) return 0;
 	if (phaseBeats < attack) return attack === 0 ? 1 : phaseBeats / attack;
-	if (decay === 0) return 1;
+	if (decay === 0) return 0;
 	const t = (phaseBeats - attack) / decay;
 	return t >= 1 ? 0 : 1 - t;
 }
@@ -65,7 +65,11 @@ export function triggerBeatsFor(curves: Curve[], trigger: ModEnvelope['trigger']
 			continue;
 		}
 		for (let index = 1; index < points.length; index++) {
-			if (slopeOctavesPerBeat(points[index - 1], points[index]) >= CHANGE_OCTAVES_PER_BEAT) {
+			if (
+				slopeOctavesPerBeat(points[index - 1], points[index]) >= CHANGE_OCTAVES_PER_BEAT &&
+				index + 1 < points.length &&
+				slopeOctavesPerBeat(points[index], points[index + 1]) <= 0.25
+			) {
 				out.push(points[index].time);
 			}
 		}
